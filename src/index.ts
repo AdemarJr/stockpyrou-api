@@ -14,17 +14,32 @@ import suppliersRoutes from './routes/suppliers.js';
 
 const app = new Hono();
 
-const frontendUrl = process.env.FRONTEND_URL?.trim() || 'http://localhost:3000';
+function parseAllowedOrigins(): string[] {
+  const fromList = (process.env.FRONTEND_URLS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const single = process.env.FRONTEND_URL?.trim();
+  const defaults = [
+    'https://stockpyrou.com.br',
+    'https://www.stockpyrou.com.br',
+    'http://localhost:3000',
+    'http://localhost:5173',
+  ];
+  return [...new Set([...(single ? [single] : []), ...fromList, ...defaults])];
+}
+
+const allowedOrigins = parseAllowedOrigins();
 
 app.use('*', logger());
 app.use(
   '*',
   cors({
     origin: (origin) => {
-      if (!origin) return frontendUrl;
-      if (origin === frontendUrl) return origin;
+      if (!origin) return allowedOrigins[0];
+      if (allowedOrigins.includes(origin)) return origin;
       if (origin.startsWith('http://localhost:')) return origin;
-      return frontendUrl;
+      return null;
     },
     allowMethods: ['GET', 'HEAD', 'PUT', 'POST', 'DELETE', 'PATCH', 'OPTIONS'],
     allowHeaders: [
@@ -33,6 +48,9 @@ app.use(
       'X-Custom-Token',
       'X-Company-Id',
     ],
+    exposeHeaders: ['Content-Length'],
+    maxAge: 86400,
+    credentials: true,
   }),
 );
 
