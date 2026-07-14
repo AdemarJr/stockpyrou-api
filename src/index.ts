@@ -36,7 +36,12 @@ app.use(
   }),
 );
 
-app.get('/api/health', async (c) => {
+app.get('/api/health', (c) => {
+  // Liveness para Railway: não depende do banco (senão o deploy falha com 503).
+  return c.json({ status: 'ok', version: '0.2.0' });
+});
+
+app.get('/api/ready', async (c) => {
   try {
     await getPool().query('SELECT 1');
     return c.json({ status: 'ok', database: 'connected', version: '0.2.0' });
@@ -58,6 +63,6 @@ app.route('/api/reports', reportsRoutes);
 const port = Number(process.env.PORT) || 3001;
 const hostname = process.env.HOST?.trim() || '0.0.0.0';
 
-console.log(`[stockpyrou-server] listening on http://${hostname}:${port}`);
+console.log(`[stockpyrou-api] listening on http://${hostname}:${port}`);
 
 serve({ fetch: app.fetch, port, hostname });
