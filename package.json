@@ -1,0 +1,27 @@
+{
+  "name": "stockpyrou-api",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.14.4",
+    "bcryptjs": "^3.0.2",
+    "dotenv": "^16.5.0",
+    "hono": "^4.7.10",
+    "pg": "^8.16.0",
+    "tsx": "^4.19.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/pg": "^8.15.2",
+    "typescript": "^5.8.3"
+  }
+}
