@@ -11,6 +11,7 @@ import productsRoutes from './routes/products.js';
 import reportsRoutes from './routes/reports.js';
 import stockRoutes from './routes/stock.js';
 import suppliersRoutes from './routes/suppliers.js';
+import costsRoutes from './routes/costs.js';
 
 const app = new Hono();
 
@@ -77,6 +78,7 @@ app.route('/api/price-history', priceHistoryRoutes);
 app.route('/api/companies', companiesRoutes);
 app.route('/api/cashier', cashierRoutes);
 app.route('/api/reports', reportsRoutes);
+app.route('/api/costs', costsRoutes);
 
 const port = Number(process.env.PORT) || 3001;
 const hostname = process.env.HOST?.trim() || '0.0.0.0';
