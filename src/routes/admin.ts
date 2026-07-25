@@ -14,10 +14,7 @@ const admin = new Hono<{ Variables: AppVariables }>();
 
 function requireSuperAdmin(c: { get: (k: 'auth') => AppVariables['auth'] }) {
   const auth = c.get('auth');
-  if (auth.role !== 'superadmin' && !auth.permissions?.canManageUsers) {
-    return false;
-  }
-  return true;
+  return auth.role === 'superadmin';
 }
 
 function mapDbRoleToApp(role: string): UserRole {

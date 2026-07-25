@@ -23,14 +23,24 @@ export interface UserProfile {
   updatedAt: Date;
 }
 
+/** Aceita role do banco (`super_admin`) e já mapeada no KV/sessão (`superadmin`). */
 export function mapAppUserRole(dbRole: string): UserRole {
-  switch (dbRole) {
+  switch (String(dbRole || '').trim().toLowerCase()) {
     case 'super_admin':
+    case 'superadmin':
       return 'superadmin';
     case 'admin':
       return 'admin';
     case 'manager':
+    case 'gerente':
       return 'gerente';
+    case 'visualizacao':
+    case 'viewer':
+      return 'visualizacao';
+    case 'operador':
+    case 'user':
+    case 'operator':
+      return 'operador';
     default:
       return 'operador';
   }

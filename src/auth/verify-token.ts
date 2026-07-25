@@ -130,8 +130,9 @@ export async function verifyRequestToken(token: string | null | undefined): Prom
     return profileFromCompanyUser(userId);
   }
 
-  const fromKv = await profileFromKvUser(userId);
-  if (fromKv) return fromKv;
+  // Preferir app_users (fonte de verdade) — KV pode ter role já no formato do app.
+  const fromDb = await profileFromAppUser(userId);
+  if (fromDb) return fromDb;
 
-  return profileFromAppUser(userId);
+  return profileFromKvUser(userId);
 }
