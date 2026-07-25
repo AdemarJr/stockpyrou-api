@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { compare } from 'bcryptjs';
-import { kvGet, kvSet } from '../db/kv.js';
+import { kvGet, kvRecord, kvSet } from '../db/kv.js';
 import { query } from '../db/pool.js';
 import {
   getPermissionsByRole,
@@ -244,7 +244,7 @@ export async function loginWithPassword(
 }
 
 export async function getUserProfileByToken(token: string): Promise<UserProfile | null> {
-  const session = await kvGet(`session:${token}`);
+  const session = kvRecord(await kvGet(`session:${token}`));
   if (!session) return null;
 
   const expiresAt = session.expiresAt ? new Date(String(session.expiresAt)) : null;
@@ -255,7 +255,7 @@ export async function getUserProfileByToken(token: string): Promise<UserProfile 
 
   if (userId.startsWith('company_')) {
     const companyId = userId.replace(/^company_/, '');
-    const company = await kvGet(`company:${companyId}`);
+    const company = kvRecord(await kvGet(`company:${companyId}`));
     if (company) {
       return {
         id: userId,
@@ -287,7 +287,7 @@ export async function getUserProfileByToken(token: string): Promise<UserProfile 
     };
   }
 
-  const profileKv = await kvGet(`user:${userId}`);
+  const profileKv = kvRecord(await kvGet(`user:${userId}`));
   if (profileKv) {
     const role = mapAppUserRole(String(profileKv.role ?? 'user'));
     return {

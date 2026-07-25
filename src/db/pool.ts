@@ -14,7 +14,6 @@ export function getPool(): pg.Pool {
     pool = new Pool({
       connectionString,
       max: 10,
-      ssl: connectionString.includes('supabase') ? { rejectUnauthorized: false } : undefined,
     });
   }
   return pool;

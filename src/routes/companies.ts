@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { kvGet } from '../db/kv.js';
+import { kvGet, kvRecord } from '../db/kv.js';
 import { query } from '../db/pool.js';
 import { resolveCompanyId } from '../auth/resolve-company.js';
 import { getUserProfileByToken } from '../auth/login-service.js';
@@ -44,7 +44,7 @@ companies.get('/me', async (c) => {
   );
   if (!companyId) return c.json({ error: 'Company not found' }, 404);
 
-  const kvCompany = await kvGet(`company:${companyId}`);
+  const kvCompany = kvRecord(await kvGet(`company:${companyId}`));
   if (kvCompany) {
     return c.json({ company: mapCompany(kvCompany) });
   }

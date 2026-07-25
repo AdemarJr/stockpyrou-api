@@ -12,6 +12,9 @@ import reportsRoutes from './routes/reports.js';
 import stockRoutes from './routes/stock.js';
 import suppliersRoutes from './routes/suppliers.js';
 import costsRoutes from './routes/costs.js';
+import adminRoutes from './routes/admin.js';
+import usersRoutes from './routes/users.js';
+import zigRoutes from './routes/zig.js';
 
 const app = new Hono();
 
@@ -48,6 +51,8 @@ app.use(
       'Authorization',
       'X-Custom-Token',
       'X-Company-Id',
+      'X-ZIG-TOKEN',
+      'X-ZIG-CRON-SECRET',
     ],
     exposeHeaders: ['Content-Length'],
     maxAge: 86400,
@@ -79,6 +84,9 @@ app.route('/api/companies', companiesRoutes);
 app.route('/api/cashier', cashierRoutes);
 app.route('/api/reports', reportsRoutes);
 app.route('/api/costs', costsRoutes);
+app.route('/api/admin', adminRoutes);
+app.route('/api/users', usersRoutes);
+app.route('/api/zig', zigRoutes);
 
 const port = Number(process.env.PORT) || 3001;
 const hostname = process.env.HOST?.trim() || '0.0.0.0';

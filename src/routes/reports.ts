@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { query } from '../db/pool.js';
 import type { AppVariables } from '../middleware/auth.js';
 import { requireAuth, requireCompany } from '../middleware/auth.js';
+import { buildZigSaidaComparisonReport } from '../services/zig-service.js';
 
 const reports = new Hono<{ Variables: AppVariables }>();
 reports.use('*', requireAuth, requireCompany);
@@ -74,6 +75,27 @@ reports.get('/closures', async (c) => {
       notes: r.closing_notes,
     })),
   });
+});
+
+reports.get('/zig-saida-comparison', async (c) => {
+  try {
+    const companyId = c.get('companyId');
+    const startDate = c.req.query('startDate');
+    const endDate = c.req.query('endDate');
+    if (!startDate || !endDate) {
+      return c.json(
+        { error: 'Informe startDate e endDate (YYYY-MM-DD) no período do relatório.' },
+        400,
+      );
+    }
+
+    const result = await buildZigSaidaComparisonReport(companyId, startDate, endDate);
+    return c.json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Erro ao montar comparativo ZIG';
+    console.error('zig-saida-comparison:', error);
+    return c.json({ error: message }, 500);
+  }
 });
 
 export default reports;

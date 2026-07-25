@@ -1,6 +1,6 @@
 import { query } from '../db/pool.js';
 import type { AuthContext } from '../types/auth.js';
-import { mapAppUserRole } from '../auth/permissions.js';
+import { getPermissionsByRole, mapAppUserRole, type UserRole } from '../auth/permissions.js';
 
 type KvRow = { value: Record<string, unknown> };
 
@@ -50,24 +50,28 @@ async function profileFromAppUser(userId: string): Promise<AuthContext | null> {
   );
   const row = rows[0];
   if (!row) return null;
+  const role = mapAppUserRole(row.role);
   return {
     userId: row.id,
     email: row.email,
     fullName: row.full_name,
-    role: mapAppUserRole(row.role),
+    role,
     companyId: row.company_id ?? undefined,
+    permissions: getPermissionsByRole(role),
   };
 }
 
 async function profileFromKvUser(userId: string): Promise<AuthContext | null> {
   const profile = await kvGet(`user:${userId}`);
   if (!profile) return null;
+  const role = mapAppUserRole(String(profile.role ?? 'user')) as UserRole;
   return {
     userId: String(profile.id ?? userId),
     email: String(profile.email ?? ''),
     fullName: String(profile.fullName ?? profile.full_name ?? 'Usuário'),
-    role: String(profile.role ?? 'user'),
+    role,
     companyId: profile.companyId != null ? String(profile.companyId) : profile.company_id != null ? String(profile.company_id) : undefined,
+    permissions: getPermissionsByRole(role),
   };
 }
 
@@ -87,6 +91,7 @@ async function profileFromCompanyUser(userId: string): Promise<AuthContext | nul
       fullName: `Admin - ${row.name}`,
       role: 'admin',
       companyId: row.id,
+      permissions: getPermissionsByRole('admin'),
     };
   }
   return {
@@ -95,6 +100,7 @@ async function profileFromCompanyUser(userId: string): Promise<AuthContext | nul
     fullName: `Admin - ${String(company.name ?? 'Empresa')}`,
     role: 'admin',
     companyId: String(company.id ?? companyId),
+    permissions: getPermissionsByRole('admin'),
   };
 }
 
