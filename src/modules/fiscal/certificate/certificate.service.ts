@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { query } from '../../../db/pool.js';
 import { encryptBytes, encryptSecret } from '../secrets.js';
+import { parsePfx } from './xml-signer.js';
 
 export interface CertificateStatus {
   present: boolean;
@@ -54,8 +55,7 @@ export async function getCertificateStatus(companyId: string): Promise<Certifica
 
 /**
  * Upload A1 (.pfx/.p12) em base64.
- * Metadados de validade são preenchidos quando disponíveis; validação PKCS#12 completa
- * entra na Etapa 2 (node-forge / openssl).
+ * Valida senha e extrai CN/validade antes de gravar.
  */
 export async function uploadCertificate(params: {
   companyId: string;
@@ -73,20 +73,38 @@ export async function uploadCertificate(params: {
     : params.fileBase64;
   let buffer: Buffer;
   try {
-    buffer = Buffer.from(raw, 'base64');
+    buffer = Buffer.from(raw.replace(/\s/g, ''), 'base64');
   } catch {
     throw new Error('Arquivo do certificado inválido');
   }
   if (buffer.length < 100) throw new Error('Arquivo do certificado muito pequeno');
   if (buffer.length > 5 * 1024 * 1024) throw new Error('Certificado maior que 5MB');
 
+  // Valida PKCS#12 imediatamente (senha + arquivo)
+  let parsed;
+  try {
+    parsed = parsePfx(buffer, password);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      message.includes('senha') || message.includes('PFX') || message.includes('A1')
+        ? message
+        : `Não foi possível abrir o certificado A1: ${message}`,
+    );
+  }
+
   const encryptedCert = encryptBytes(buffer);
   const encryptedPassword = encryptSecret(password);
   const fingerprint = createHash('sha256').update(buffer).digest('hex');
 
-  const subjectCn = params.subjectCn?.trim() || 'Certificado A1';
-  const validFrom = params.validFrom ? new Date(params.validFrom) : null;
-  const validUntil = params.validUntil ? new Date(params.validUntil) : null;
+  const subjectCn =
+    params.subjectCn?.trim() && !params.subjectCn.includes('.pfx')
+      ? params.subjectCn.trim()
+      : parsed.subjectCn;
+
+  const validFrom = parsed.certificate.validity.notBefore;
+  const validUntil = parsed.certificate.validity.notAfter;
+  const serialNumber = parsed.certificate.serialNumber || null;
 
   const existing = await getCertificateStatus(params.companyId);
 
@@ -96,16 +114,17 @@ export async function uploadCertificate(params: {
          certificate_encrypted=$1,
          password_encrypted=$2,
          subject_cn=$3,
-         serial_number=NULL,
-         valid_from=$4,
-         valid_until=$5,
-         fingerprint_sha256=$6,
+         serial_number=$4,
+         valid_from=$5,
+         valid_until=$6,
+         fingerprint_sha256=$7,
          updated_at=now()
-       WHERE company_id=$7`,
+       WHERE company_id=$8`,
       [
         encryptedCert,
         encryptedPassword,
         subjectCn,
+        serialNumber,
         validFrom,
         validUntil,
         fingerprint,
@@ -116,13 +135,14 @@ export async function uploadCertificate(params: {
     await query(
       `INSERT INTO fiscal_certificate (
          company_id, certificate_encrypted, password_encrypted,
-         subject_cn, valid_from, valid_until, fingerprint_sha256
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+         subject_cn, serial_number, valid_from, valid_until, fingerprint_sha256
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
       [
         params.companyId,
         encryptedCert,
         encryptedPassword,
         subjectCn,
+        serialNumber,
         validFrom,
         validUntil,
         fingerprint,

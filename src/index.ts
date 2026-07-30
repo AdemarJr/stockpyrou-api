@@ -65,13 +65,13 @@ app.use(
 
 app.get('/api/health', (c) => {
   // Liveness para Railway: não depende do banco (senão o deploy falha com 503).
-  return c.json({ status: 'ok', version: '0.2.2', routes: ['customers', 'fiscal', 'nfce', 'receivables'] });
+  return c.json({ status: 'ok', version: '0.2.3', routes: ['customers', 'fiscal', 'nfce', 'receivables'] });
 });
 
 app.get('/api/ready', async (c) => {
   try {
     await getPool().query('SELECT 1');
-    return c.json({ status: 'ok', database: 'connected', version: '0.2.2' });
+    return c.json({ status: 'ok', database: 'connected', version: '0.2.3' });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'unknown error';
     return c.json({ status: 'degraded', database: 'disconnected', error: message }, 503);
