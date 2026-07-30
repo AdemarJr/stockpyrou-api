@@ -277,7 +277,8 @@ export async function getFiscalReadiness(companyId: string): Promise<FiscalReadi
    * Pendências de cadastro aparecem como aviso (configComplete).
    */
   const ready = moduleEnabled;
-  const emissionAvailable = false;
+  /** Pronto para autorizar na SEFAZ (cert + CSC + dados cadastrais). */
+  const emissionAvailable = configComplete && moduleEnabled && !!cert && !expired;
 
   return {
     moduleEnabled,

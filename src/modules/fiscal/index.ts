@@ -10,6 +10,14 @@ import {
   uploadCertificate,
 } from './certificate/certificate.service.js';
 import { getSefazEndpoints, type FiscalEnvironment } from './sefaz/sefaz-endpoints.js';
+import {
+  cancelNfce,
+  createAndAuthorizeFromSale,
+  getNfceById,
+  getNfceBySale,
+  getNfceRaw,
+  listNfce,
+} from './nfce/create-nfce.service.js';
 
 export {
   getCertificateStatus,
@@ -19,6 +27,12 @@ export {
   deleteCertificate,
   uploadCertificate,
   getSefazEndpoints,
+  cancelNfce,
+  createAndAuthorizeFromSale,
+  getNfceById,
+  getNfceBySale,
+  getNfceRaw,
+  listNfce,
 };
 
 export type { UpsertFiscalConfigInput, FiscalEnvironment };

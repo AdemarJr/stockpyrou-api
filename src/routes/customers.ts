@@ -23,6 +23,12 @@ function formatDocument(digits: string, type: 'cpf' | 'cnpj'): string {
   return digits;
 }
 
+function strOrNull(v: unknown): string | null {
+  if (v == null) return null;
+  const s = String(v).trim();
+  return s.length ? s : null;
+}
+
 function mapCustomer(row: Record<string, unknown>) {
   const digits = String(row.document_digits || '');
   const documentType = (row.document_type === 'cnpj' ? 'cnpj' : 'cpf') as 'cpf' | 'cnpj';
@@ -36,6 +42,14 @@ function mapCustomer(row: Record<string, unknown>) {
     email: row.email != null ? String(row.email) : null,
     phone: row.phone != null ? String(row.phone) : null,
     notes: row.notes != null ? String(row.notes) : null,
+    logradouro: row.logradouro != null ? String(row.logradouro) : null,
+    numero: row.numero != null ? String(row.numero) : null,
+    complemento: row.complemento != null ? String(row.complemento) : null,
+    bairro: row.bairro != null ? String(row.bairro) : null,
+    municipio: row.municipio != null ? String(row.municipio) : null,
+    codigoMunicipio: row.codigo_municipio != null ? String(row.codigo_municipio) : null,
+    uf: row.uf != null ? String(row.uf) : null,
+    cep: row.cep != null ? String(row.cep) : null,
     isActive: row.is_active !== false,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -61,13 +75,27 @@ function validateCustomerInput(body: Record<string, unknown>) {
   if (documentType === 'cnpj' && digits.length !== 14) {
     return { error: 'CNPJ inválido — informe 14 dígitos' };
   }
+
+  const ufRaw = strOrNull(body.uf);
+  const uf = ufRaw ? ufRaw.toUpperCase().slice(0, 2) : null;
+  const cepDigits = onlyDigits(String(body.cep || ''));
+  const cep = cepDigits.length ? cepDigits.slice(0, 8) : null;
+
   return {
     name,
     documentDigits: digits,
     documentType,
-    email: body.email != null ? String(body.email).trim() || null : null,
-    phone: body.phone != null ? String(body.phone).trim() || null : null,
-    notes: body.notes != null ? String(body.notes).trim() || null : null,
+    email: strOrNull(body.email),
+    phone: strOrNull(body.phone),
+    notes: strOrNull(body.notes),
+    logradouro: strOrNull(body.logradouro),
+    numero: strOrNull(body.numero),
+    complemento: strOrNull(body.complemento),
+    bairro: strOrNull(body.bairro),
+    municipio: strOrNull(body.municipio),
+    codigoMunicipio: strOrNull(body.codigoMunicipio ?? body.codigo_municipio),
+    uf,
+    cep,
   };
 }
 
@@ -86,9 +114,9 @@ customers.get('/', async (c) => {
     if (q) {
       params.push(`%${q}%`);
       params.push(`${onlyDigits(q)}%`);
-      sql += ` AND (name ILIKE $${params.length - 1} OR document_digits LIKE $${params.length})`;
+      sql += ` AND (name ILIKE $${params.length - 1} OR document_digits LIKE $${params.length} OR COALESCE(phone,'') ILIKE $${params.length - 1})`;
     }
-    sql += ` ORDER BY name ASC LIMIT 100`;
+    sql += ` ORDER BY name ASC LIMIT 200`;
 
     const { rows } = await query(sql, params);
     return c.json({
@@ -126,53 +154,124 @@ customers.post('/', async (c) => {
   const parsed = validateCustomerInput(body as Record<string, unknown>);
   if ('error' in parsed) return c.json({ error: parsed.error }, 400);
 
+  const addressCols = [
+    parsed.logradouro,
+    parsed.numero,
+    parsed.complemento,
+    parsed.bairro,
+    parsed.municipio,
+    parsed.codigoMunicipio,
+    parsed.uf,
+    parsed.cep,
+  ];
+
   try {
     const { rows: existing } = await query(
       `SELECT * FROM customers WHERE company_id = $1 AND document_digits = $2 LIMIT 1`,
       [companyId, parsed.documentDigits],
     );
     if (existing[0]) {
-      // Reativa / atualiza nome se já existir
+      try {
+        const { rows } = await query(
+          `UPDATE customers SET
+             name = $1, email = COALESCE($2, email), phone = COALESCE($3, phone),
+             notes = COALESCE($4, notes),
+             logradouro = COALESCE($5, logradouro),
+             numero = COALESCE($6, numero),
+             complemento = COALESCE($7, complemento),
+             bairro = COALESCE($8, bairro),
+             municipio = COALESCE($9, municipio),
+             codigo_municipio = COALESCE($10, codigo_municipio),
+             uf = COALESCE($11, uf),
+             cep = COALESCE($12, cep),
+             is_active = true, updated_at = now()
+           WHERE id = $13 AND company_id = $14
+           RETURNING *`,
+          [
+            parsed.name,
+            parsed.email,
+            parsed.phone,
+            parsed.notes,
+            ...addressCols,
+            existing[0].id,
+            companyId,
+          ],
+        );
+        return c.json({
+          success: true,
+          customer: mapCustomer(rows[0] as Record<string, unknown>),
+          reused: true,
+        });
+      } catch (err) {
+        // Colunas de endereço ainda não migradas
+        const msg = err instanceof Error ? err.message : String(err);
+        if (!/logradouro|column/i.test(msg)) throw err;
+        const { rows } = await query(
+          `UPDATE customers SET
+             name = $1, email = COALESCE($2, email), phone = COALESCE($3, phone),
+             notes = COALESCE($4, notes), is_active = true, updated_at = now()
+           WHERE id = $5 AND company_id = $6
+           RETURNING *`,
+          [
+            parsed.name,
+            parsed.email,
+            parsed.phone,
+            parsed.notes,
+            existing[0].id,
+            companyId,
+          ],
+        );
+        return c.json({
+          success: true,
+          customer: mapCustomer(rows[0] as Record<string, unknown>),
+          reused: true,
+        });
+      }
+    }
+
+    try {
       const { rows } = await query(
-        `UPDATE customers SET
-           name = $1, email = COALESCE($2, email), phone = COALESCE($3, phone),
-           notes = COALESCE($4, notes), is_active = true, updated_at = now()
-         WHERE id = $5 AND company_id = $6
-         RETURNING *`,
+        `INSERT INTO customers (
+           company_id, name, document_digits, document_type, email, phone, notes,
+           logradouro, numero, complemento, bairro, municipio, codigo_municipio, uf, cep
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
         [
+          companyId,
           parsed.name,
+          parsed.documentDigits,
+          parsed.documentType,
           parsed.email,
           parsed.phone,
           parsed.notes,
-          existing[0].id,
-          companyId,
+          ...addressCols,
         ],
       );
-      return c.json({
-        success: true,
-        customer: mapCustomer(rows[0] as Record<string, unknown>),
-        reused: true,
-      });
+      return c.json(
+        { success: true, customer: mapCustomer(rows[0] as Record<string, unknown>) },
+        201,
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!/logradouro|column/i.test(msg)) throw err;
+      const { rows } = await query(
+        `INSERT INTO customers (
+           company_id, name, document_digits, document_type, email, phone, notes
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+        [
+          companyId,
+          parsed.name,
+          parsed.documentDigits,
+          parsed.documentType,
+          parsed.email,
+          parsed.phone,
+          parsed.notes,
+        ],
+      );
+      return c.json(
+        { success: true, customer: mapCustomer(rows[0] as Record<string, unknown>) },
+        201,
+      );
     }
-
-    const { rows } = await query(
-      `INSERT INTO customers (
-         company_id, name, document_digits, document_type, email, phone, notes
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-      [
-        companyId,
-        parsed.name,
-        parsed.documentDigits,
-        parsed.documentType,
-        parsed.email,
-        parsed.phone,
-        parsed.notes,
-      ],
-    );
-    return c.json(
-      { success: true, customer: mapCustomer(rows[0] as Record<string, unknown>) },
-      201,
-    );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (/relation .* does not exist/i.test(message)) {
@@ -193,32 +292,79 @@ customers.put('/:id', async (c) => {
   if ('error' in parsed) return c.json({ error: parsed.error }, 400);
 
   try {
-    const { rows } = await query(
-      `UPDATE customers SET
-         name = $1,
-         document_digits = $2,
-         document_type = $3,
-         email = $4,
-         phone = $5,
-         notes = $6,
-         is_active = COALESCE($7, is_active),
-         updated_at = now()
-       WHERE id = $8 AND company_id = $9
-       RETURNING *`,
-      [
-        parsed.name,
-        parsed.documentDigits,
-        parsed.documentType,
-        parsed.email,
-        parsed.phone,
-        parsed.notes,
-        body.isActive != null ? !!body.isActive : null,
-        c.req.param('id'),
-        companyId,
-      ],
-    );
-    if (!rows[0]) return c.json({ error: 'Cliente não encontrado' }, 404);
-    return c.json({ success: true, customer: mapCustomer(rows[0] as Record<string, unknown>) });
+    try {
+      const { rows } = await query(
+        `UPDATE customers SET
+           name = $1,
+           document_digits = $2,
+           document_type = $3,
+           email = $4,
+           phone = $5,
+           notes = $6,
+           logradouro = $7,
+           numero = $8,
+           complemento = $9,
+           bairro = $10,
+           municipio = $11,
+           codigo_municipio = $12,
+           uf = $13,
+           cep = $14,
+           is_active = COALESCE($15, is_active),
+           updated_at = now()
+         WHERE id = $16 AND company_id = $17
+         RETURNING *`,
+        [
+          parsed.name,
+          parsed.documentDigits,
+          parsed.documentType,
+          parsed.email,
+          parsed.phone,
+          parsed.notes,
+          parsed.logradouro,
+          parsed.numero,
+          parsed.complemento,
+          parsed.bairro,
+          parsed.municipio,
+          parsed.codigoMunicipio,
+          parsed.uf,
+          parsed.cep,
+          body.isActive != null ? !!body.isActive : null,
+          c.req.param('id'),
+          companyId,
+        ],
+      );
+      if (!rows[0]) return c.json({ error: 'Cliente não encontrado' }, 404);
+      return c.json({ success: true, customer: mapCustomer(rows[0] as Record<string, unknown>) });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!/logradouro|column/i.test(msg)) throw err;
+      const { rows } = await query(
+        `UPDATE customers SET
+           name = $1,
+           document_digits = $2,
+           document_type = $3,
+           email = $4,
+           phone = $5,
+           notes = $6,
+           is_active = COALESCE($7, is_active),
+           updated_at = now()
+         WHERE id = $8 AND company_id = $9
+         RETURNING *`,
+        [
+          parsed.name,
+          parsed.documentDigits,
+          parsed.documentType,
+          parsed.email,
+          parsed.phone,
+          parsed.notes,
+          body.isActive != null ? !!body.isActive : null,
+          c.req.param('id'),
+          companyId,
+        ],
+      );
+      if (!rows[0]) return c.json({ error: 'Cliente não encontrado' }, 404);
+      return c.json({ success: true, customer: mapCustomer(rows[0] as Record<string, unknown>) });
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (/unique|duplicate/i.test(message)) {

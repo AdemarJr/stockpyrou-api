@@ -9,6 +9,12 @@ import {
   getSefazEndpoints,
   saveFiscalConfig,
   uploadCertificate,
+  cancelNfce,
+  createAndAuthorizeFromSale,
+  getNfceById,
+  getNfceBySale,
+  getNfceRaw,
+  listNfce,
   type FiscalEnvironment,
 } from '../modules/fiscal/index.js';
 
@@ -192,6 +198,127 @@ fiscal.get('/endpoints', async (c) => {
   const ambiente = (config?.ambiente || 'homologation') as FiscalEnvironment;
   const endpoints = getSefazEndpoints(ambiente);
   return c.json({ success: true, ambiente, endpoints });
+});
+
+/** Lista NFC-e recentes. */
+fiscal.get('/nfce', async (c) => {
+  const companyId = c.get('companyId');
+  const limit = Math.min(Number(c.req.query('limit') || 50), 200);
+  try {
+    const items = await listNfce(companyId, limit);
+    return c.json({ success: true, nfce: items });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (/relation .* does not exist/i.test(message)) {
+      return c.json({
+        success: true,
+        nfce: [],
+        needsMigration: true,
+        error: 'Execute scripts/add_nfce_emission.sql no banco',
+      });
+    }
+    return c.json({ error: message }, 500);
+  }
+});
+
+/** NFC-e vinculadas a uma venda. */
+fiscal.get('/nfce/by-sale/:saleId', async (c) => {
+  const companyId = c.get('companyId');
+  try {
+    const items = await getNfceBySale(companyId, c.req.param('saleId'));
+    return c.json({ success: true, nfce: items });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return c.json({ error: message }, 500);
+  }
+});
+
+fiscal.get('/nfce/:id', async (c) => {
+  const companyId = c.get('companyId');
+  const nfce = await getNfceById(companyId, c.req.param('id'));
+  if (!nfce) return c.json({ error: 'NFC-e não encontrada' }, 404);
+  return c.json({ success: true, nfce });
+});
+
+fiscal.get('/nfce/:id/danfe', async (c) => {
+  const companyId = c.get('companyId');
+  const raw = await getNfceRaw(companyId, c.req.param('id'));
+  if (!raw) return c.json({ error: 'NFC-e não encontrada' }, 404);
+  const html = raw.danfe_html != null ? String(raw.danfe_html) : null;
+  if (!html) return c.json({ error: 'DANFE ainda não disponível' }, 404);
+  return c.json({ success: true, html, status: raw.status, chaveAcesso: raw.chave_acesso });
+});
+
+fiscal.get('/nfce/:id/xml', async (c) => {
+  const companyId = c.get('companyId');
+  const raw = await getNfceRaw(companyId, c.req.param('id'));
+  if (!raw) return c.json({ error: 'NFC-e não encontrada' }, 404);
+  const xml =
+    (raw.xml_autorizado != null ? String(raw.xml_autorizado) : null) ||
+    (raw.xml_assinado != null ? String(raw.xml_assinado) : null) ||
+    (raw.xml_original != null ? String(raw.xml_original) : null);
+  if (!xml) return c.json({ error: 'XML não disponível' }, 404);
+  return c.json({
+    success: true,
+    xml,
+    status: raw.status,
+    chaveAcesso: raw.chave_acesso,
+  });
+});
+
+/**
+ * Emite / autoriza NFC-e a partir de uma venda.
+ * Body: { saleId: string }
+ */
+fiscal.post('/nfce', async (c) => {
+  const companyId = c.get('companyId');
+  const body = await c.req.json().catch(() => ({}));
+  const saleId = String(body.saleId || body.sale_id || '').trim();
+  if (!saleId) return c.json({ error: 'saleId é obrigatório' }, 400);
+
+  try {
+    const result = await createAndAuthorizeFromSale({ companyId, saleId });
+    const ok = result.nfce.status === 'AUTHORIZED';
+    return c.json({
+      success: ok,
+      message: result.message,
+      nfce: result.nfce,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[fiscal/nfce POST]', err);
+    if (/relation .* does not exist/i.test(message)) {
+      return c.json({ error: 'Execute scripts/add_nfce_emission.sql no banco' }, 503);
+    }
+    const status = /bloqueada|desabilitado|não configurado|não encontrada|sem itens/i.test(message)
+      ? 400
+      : 500;
+    return c.json({ error: message }, status);
+  }
+});
+
+/** Cancelamento (evento 110111). Body: { justification } */
+fiscal.post('/nfce/:id/cancel', async (c) => {
+  const companyId = c.get('companyId');
+  const body = await c.req.json().catch(() => ({}));
+  const justification = String(body.justification || body.justificativa || '').trim();
+  try {
+    const nfce = await cancelNfce({
+      companyId,
+      nfceId: c.req.param('id'),
+      justification,
+    });
+    const ok = nfce?.status === 'CANCELLED';
+    return c.json({
+      success: ok,
+      message: ok ? 'NFC-e cancelada' : `Cancelamento não aceito: ${nfce?.motivoStatus || ''}`,
+      nfce,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const status = /mínimo|somente|não encontrada/i.test(message) ? 400 : 500;
+    return c.json({ error: message }, status);
+  }
 });
 
 export default fiscal;
