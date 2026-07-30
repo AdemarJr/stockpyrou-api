@@ -37,6 +37,8 @@ fiscal.get('/readiness', async (c) => {
     if (/relation .* does not exist/i.test(message)) {
       return c.json({
         success: true,
+        moduleEnabled: false,
+        configComplete: false,
         ready: false,
         emissionAvailable: false,
         reasons: ['Execute a migration scripts/add_fiscal_config.sql no banco'],

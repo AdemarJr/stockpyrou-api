@@ -214,6 +214,11 @@ export async function saveFiscalConfig(
 }
 
 export interface FiscalReadiness {
+  /** Módulo ligado em Integrações — libera opção NFC-e no PDV. */
+  moduleEnabled: boolean;
+  /** Dados + CSC + certificado completos (para emissão real). */
+  configComplete: boolean;
+  /** Alias UX: pode selecionar NFC-e no checkout (= moduleEnabled). */
   ready: boolean;
   emissionAvailable: boolean;
   reasons: string[];
@@ -237,10 +242,12 @@ export async function getFiscalReadiness(companyId: string): Promise<FiscalReadi
     | undefined;
 
   const reasons: string[] = [];
+  const moduleEnabled = !!config?.enabled;
+
   if (!config) {
     reasons.push('Configure os dados fiscais da empresa');
   } else {
-    if (!config.enabled) reasons.push('Módulo fiscal desabilitado');
+    if (!config.enabled) reasons.push('Módulo fiscal desabilitado — ative em Integrações → Fiscal');
     if (!config.cnpj || config.cnpj.length !== 14) reasons.push('CNPJ inválido');
     if (!config.ie) reasons.push('Inscrição Estadual ausente');
     if (!config.razaoSocial) reasons.push('Razão social ausente');
@@ -260,18 +267,26 @@ export async function getFiscalReadiness(companyId: string): Promise<FiscalReadi
     reasons.push('Certificado digital expirado');
   }
 
-  /** Config + certificado OK — PDV pode marcar “Emitir NFC-e”. */
-  const ready = reasons.length === 0;
+  /** Completo = sem pendências além do próprio “desabilitado”. */
+  const configComplete =
+    !!config &&
+    reasons.every((r) => r.startsWith('Módulo fiscal desabilitado'));
+
   /**
-   * SOAP/autorização SEFAZ ainda não liberado (etapas 4–6).
-   * Produção permanece bloqueada até homologação.
+   * PDV: com o módulo ativado o operador já pode escolher NFC-e.
+   * Pendências de cadastro aparecem como aviso (configComplete).
    */
+  const ready = moduleEnabled;
   const emissionAvailable = false;
 
   return {
+    moduleEnabled,
+    configComplete: configComplete && moduleEnabled,
     ready,
     emissionAvailable,
-    reasons,
+    reasons: moduleEnabled
+      ? reasons.filter((r) => !r.startsWith('Módulo fiscal desabilitado'))
+      : reasons,
     config,
     certificate: {
       present: !!cert,
