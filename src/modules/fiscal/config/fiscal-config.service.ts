@@ -17,6 +17,9 @@ export interface FiscalConfigRow {
   codigo_municipio: string;
   uf: string;
   cep: string;
+  telefone: string | null;
+  email: string | null;
+  logo_url: string | null;
   crt: number;
   ambiente: FiscalEnvironment;
   serie_nfce: number;
@@ -43,6 +46,9 @@ export interface FiscalConfigPublic {
   codigoMunicipio: string;
   uf: string;
   cep: string;
+  telefone: string | null;
+  email: string | null;
+  logoUrl: string | null;
   crt: number;
   ambiente: FiscalEnvironment;
   serieNfce: number;
@@ -68,6 +74,9 @@ export interface UpsertFiscalConfigInput {
   codigoMunicipio: string;
   uf?: string;
   cep: string;
+  telefone?: string | null;
+  email?: string | null;
+  logoUrl?: string | null;
   crt?: number;
   ambiente?: FiscalEnvironment;
   serieNfce?: number;
@@ -95,6 +104,9 @@ function mapPublic(row: FiscalConfigRow, cscPlainHint?: string | null): FiscalCo
     codigoMunicipio: String(row.codigo_municipio || ''),
     uf: String(row.uf || 'AM'),
     cep: String(row.cep || ''),
+    telefone: row.telefone != null ? String(row.telefone) : null,
+    email: row.email != null ? String(row.email) : null,
+    logoUrl: row.logo_url != null ? String(row.logo_url) : null,
     crt: Number(row.crt) || 1,
     ambiente: (row.ambiente as FiscalEnvironment) || 'homologation',
     serieNfce: Number(row.serie_nfce) || 1,
@@ -160,6 +172,17 @@ export async function saveFiscalConfig(
     input.cscId !== undefined ? input.cscId?.trim() || null : existing?.csc_id ?? null;
   const enabled = input.enabled !== undefined ? !!input.enabled : existing?.enabled ?? false;
 
+  const telefone =
+    input.telefone !== undefined
+      ? input.telefone?.trim() || null
+      : existing?.telefone ?? null;
+  const email =
+    input.email !== undefined ? input.email?.trim() || null : existing?.email ?? null;
+  const logoUrl =
+    input.logoUrl !== undefined
+      ? input.logoUrl?.trim() || null
+      : existing?.logo_url ?? null;
+
   const params = [
     cnpj,
     ie,
@@ -173,6 +196,9 @@ export async function saveFiscalConfig(
     onlyDigits(input.codigoMunicipio || ''),
     uf,
     onlyDigits(input.cep || ''),
+    telefone,
+    email,
+    logoUrl,
     crt,
     ambiente,
     serie,
@@ -184,33 +210,115 @@ export async function saveFiscalConfig(
   ];
 
   if (existing) {
+    try {
+      const { rows } = await query(
+        `UPDATE fiscal_config SET
+           cnpj=$1, ie=$2, razao_social=$3, nome_fantasia=$4,
+           logradouro=$5, numero=$6, complemento=$7, bairro=$8, municipio=$9,
+           codigo_municipio=$10, uf=$11, cep=$12,
+           telefone=$13, email=$14, logo_url=$15,
+           crt=$16, ambiente=$17,
+           serie_nfce=$18, numero_nfce=$19, csc_id=$20,
+           csc_token_encrypted=COALESCE($21, csc_token_encrypted),
+           enabled=$22, updated_at=now()
+         WHERE company_id=$23
+         RETURNING *`,
+        params,
+      );
+      return mapPublic(rows[0] as FiscalConfigRow, cscPlainHint);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!/telefone|logo_url|column/i.test(msg)) throw err;
+      // Colunas novas ainda não migradas
+      const legacy = [
+        cnpj,
+        ie,
+        razaoSocial,
+        input.nomeFantasia?.trim() || null,
+        String(input.logradouro || '').trim(),
+        String(input.numero || '').trim(),
+        input.complemento?.trim() || null,
+        String(input.bairro || '').trim(),
+        String(input.municipio || '').trim(),
+        onlyDigits(input.codigoMunicipio || ''),
+        uf,
+        onlyDigits(input.cep || ''),
+        crt,
+        ambiente,
+        serie,
+        numero,
+        cscId,
+        cscEncrypted,
+        enabled,
+        companyId,
+      ];
+      const { rows } = await query(
+        `UPDATE fiscal_config SET
+           cnpj=$1, ie=$2, razao_social=$3, nome_fantasia=$4,
+           logradouro=$5, numero=$6, complemento=$7, bairro=$8, municipio=$9,
+           codigo_municipio=$10, uf=$11, cep=$12, crt=$13, ambiente=$14,
+           serie_nfce=$15, numero_nfce=$16, csc_id=$17,
+           csc_token_encrypted=COALESCE($18, csc_token_encrypted),
+           enabled=$19, updated_at=now()
+         WHERE company_id=$20
+         RETURNING *`,
+        legacy,
+      );
+      return mapPublic(rows[0] as FiscalConfigRow, cscPlainHint);
+    }
+  }
+
+  try {
     const { rows } = await query(
-      `UPDATE fiscal_config SET
-         cnpj=$1, ie=$2, razao_social=$3, nome_fantasia=$4,
-         logradouro=$5, numero=$6, complemento=$7, bairro=$8, municipio=$9,
-         codigo_municipio=$10, uf=$11, cep=$12, crt=$13, ambiente=$14,
-         serie_nfce=$15, numero_nfce=$16, csc_id=$17,
-         csc_token_encrypted=COALESCE($18, csc_token_encrypted),
-         enabled=$19, updated_at=now()
-       WHERE company_id=$20
-       RETURNING *`,
+      `INSERT INTO fiscal_config (
+         company_id, cnpj, ie, razao_social, nome_fantasia,
+         logradouro, numero, complemento, bairro, municipio, codigo_municipio,
+         uf, cep, telefone, email, logo_url, crt, ambiente, serie_nfce, numero_nfce,
+         csc_id, csc_token_encrypted, enabled
+       ) VALUES (
+         $23,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22
+       ) RETURNING *`,
       params,
     );
     return mapPublic(rows[0] as FiscalConfigRow, cscPlainHint);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!/telefone|logo_url|column/i.test(msg)) throw err;
+    const legacy = [
+      cnpj,
+      ie,
+      razaoSocial,
+      input.nomeFantasia?.trim() || null,
+      String(input.logradouro || '').trim(),
+      String(input.numero || '').trim(),
+      input.complemento?.trim() || null,
+      String(input.bairro || '').trim(),
+      String(input.municipio || '').trim(),
+      onlyDigits(input.codigoMunicipio || ''),
+      uf,
+      onlyDigits(input.cep || ''),
+      crt,
+      ambiente,
+      serie,
+      numero,
+      cscId,
+      cscEncrypted,
+      enabled,
+      companyId,
+    ];
+    const { rows } = await query(
+      `INSERT INTO fiscal_config (
+         company_id, cnpj, ie, razao_social, nome_fantasia,
+         logradouro, numero, complemento, bairro, municipio, codigo_municipio,
+         uf, cep, crt, ambiente, serie_nfce, numero_nfce,
+         csc_id, csc_token_encrypted, enabled
+       ) VALUES (
+         $20,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19
+       ) RETURNING *`,
+      legacy,
+    );
+    return mapPublic(rows[0] as FiscalConfigRow, cscPlainHint);
   }
-
-  const { rows } = await query(
-    `INSERT INTO fiscal_config (
-       company_id, cnpj, ie, razao_social, nome_fantasia,
-       logradouro, numero, complemento, bairro, municipio, codigo_municipio,
-       uf, cep, crt, ambiente, serie_nfce, numero_nfce,
-       csc_id, csc_token_encrypted, enabled
-     ) VALUES (
-       $20,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19
-     ) RETURNING *`,
-    params,
-  );
-  return mapPublic(rows[0] as FiscalConfigRow, cscPlainHint);
 }
 
 export interface FiscalReadiness {

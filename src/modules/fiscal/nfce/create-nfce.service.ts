@@ -6,7 +6,7 @@ import { loadCompanyCertificate, signXmlEnveloped } from '../certificate/xml-sig
 import { SefazAmClient } from '../sefaz/sefaz-client.js';
 import { buildAccessKey, onlyDigits, formatNFeDate, escapeXml } from './nfce-utils.js';
 import { buildNfceXml, buildQrCodeUrl, wrapNFeProc } from './nfce-xml-builder.js';
-import { buildDanfeHtml } from './danfe.js';
+import { buildDanfeHtml, buildEmitAddressLines } from './danfe.js';
 
 async function writeFiscalLog(params: {
   companyId: string;
@@ -442,7 +442,21 @@ export async function createAndAuthorizeFromSale(params: {
         serie: Number(nfceRow.serie) || serie,
         protocolo: sefazRes.protocol || '',
         emitName: config.razao_social,
+        emitFantasia: config.nome_fantasia,
         emitCnpj: config.cnpj,
+        emitIe: config.ie,
+        emitAddressLines: buildEmitAddressLines({
+          logradouro: config.logradouro,
+          numero: config.numero,
+          complemento: config.complemento,
+          bairro: config.bairro,
+          municipio: config.municipio,
+          uf: config.uf,
+          cep: config.cep,
+        }),
+        emitPhone: (config as { telefone?: string | null }).telefone ?? null,
+        emitEmail: (config as { email?: string | null }).email ?? null,
+        emitLogoUrl: (config as { logo_url?: string | null }).logo_url ?? null,
         destName: dest?.name || 'CONSUMIDOR NÃO IDENTIFICADO',
         destDoc: dest?.documentDigits || '',
         items: builtItems,
