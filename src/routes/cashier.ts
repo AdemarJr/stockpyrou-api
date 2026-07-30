@@ -129,11 +129,17 @@ cashier.post('/sale', requireAuth, async (c) => {
   const clientReq =
     typeof clientRequestId === 'string' && clientRequestId.trim() ? clientRequestId.trim() : null;
 
+  const detailsObj =
+    paymentDetails && typeof paymentDetails === 'object'
+      ? (paymentDetails as Record<string, unknown>)
+      : {};
+  const emitNfce = detailsObj.emitNfce === true || detailsObj.emit_nfce === true;
+
   let newSale: Record<string, unknown>;
   try {
     const { rows } = await query(
-      `INSERT INTO sales (company_id, register_id, cashier_id, cashier_name, total, payment_method, payment_details, items, client_request_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+      `INSERT INTO sales (company_id, register_id, cashier_id, cashier_name, total, payment_method, payment_details, items, client_request_id, emit_nfce)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
       [
         companyId,
         registerId,
@@ -141,15 +147,48 @@ cashier.post('/sale', requireAuth, async (c) => {
         auth.fullName,
         parseFloat(String(total)),
         paymentMethod,
-        JSON.stringify(paymentDetails ?? {}),
+        JSON.stringify({ ...detailsObj, emitNfce }),
         JSON.stringify(items),
         clientReq,
+        emitNfce,
       ],
     );
     newSale = rows[0] as Record<string, unknown>;
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    if (clientReq && /duplicate key|unique constraint|client_request_id/i.test(msg)) {
+    // Coluna emit_nfce ainda não migrada — grava sem ela
+    if (/emit_nfce/i.test(msg)) {
+      try {
+        const { rows } = await query(
+          `INSERT INTO sales (company_id, register_id, cashier_id, cashier_name, total, payment_method, payment_details, items, client_request_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+          [
+            companyId,
+            registerId,
+            auth.userId,
+            auth.fullName,
+            parseFloat(String(total)),
+            paymentMethod,
+            JSON.stringify({ ...detailsObj, emitNfce }),
+            JSON.stringify(items),
+            clientReq,
+          ],
+        );
+        newSale = rows[0] as Record<string, unknown>;
+      } catch (err2: unknown) {
+        const msg2 = err2 instanceof Error ? err2.message : String(err2);
+        if (clientReq && /duplicate key|unique constraint|client_request_id/i.test(msg2)) {
+          const { rows: existing } = await query(
+            'SELECT * FROM sales WHERE company_id = $1 AND client_request_id = $2 LIMIT 1',
+            [companyId, clientReq],
+          );
+          if (!existing[0]) return c.json({ error: 'Erro ao registrar venda: ' + msg2 }, 500);
+          newSale = existing[0] as Record<string, unknown>;
+        } else {
+          return c.json({ error: 'Erro ao registrar venda: ' + msg2 }, 500);
+        }
+      }
+    } else if (clientReq && /duplicate key|unique constraint|client_request_id/i.test(msg)) {
       const { rows: existing } = await query(
         'SELECT * FROM sales WHERE company_id = $1 AND client_request_id = $2 LIMIT 1',
         [companyId, clientReq],
@@ -218,6 +257,7 @@ cashier.post('/sale', requireAuth, async (c) => {
     total: parseFloat(String(newSale.total)),
     paymentMethod: newSale.payment_method,
     paymentDetails: newSale.payment_details,
+    emitNfce: !!(newSale.emit_nfce ?? emitNfce),
     timestamp: newSale.timestamp,
     cashierId: newSale.cashier_id,
     cashierName: newSale.cashier_name,
