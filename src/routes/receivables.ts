@@ -2,6 +2,12 @@ import { Hono } from 'hono';
 import { query } from '../db/pool.js';
 import type { AppVariables } from '../middleware/auth.js';
 import { requireAuth, requireCompany } from '../middleware/auth.js';
+import {
+  adjustOpenCashRegister,
+  ledgerReceivablePayment,
+  upsertLedgerMovement,
+  todayYmdLocal as ledgerTodayYmd,
+} from '../services/ledger.js';
 
 const receivables = new Hono<{ Variables: AppVariables }>();
 
@@ -213,7 +219,25 @@ receivables.post('/', async (c) => {
        RETURNING *`,
       [companyId, amount, customerName, description, referenceNumber, notes, dueDate, auth.userId],
     );
-    return c.json({ receivable: mapReceivable(rows[0] as Record<string, unknown>) });
+    const created = rows[0] as Record<string, unknown>;
+    try {
+      await upsertLedgerMovement({
+        companyId,
+        source: `ar:${String(created.id)}`,
+        direction: 'in',
+        status: 'previsto',
+        amount,
+        competencyDate: ledgerTodayYmd(),
+        dueDate,
+        paymentMethod: 'fiado',
+        description: customerName ? `A receber — ${customerName}` : description,
+        categoryCode: 'RECEBER',
+        createdBy: auth.userId,
+      });
+    } catch (err) {
+      console.warn('[receivables] ledger create:', err);
+    }
+    return c.json({ receivable: mapReceivable(created) });
   }
 
   // Parcelado: divide o valor
@@ -258,6 +282,26 @@ receivables.post('/', async (c) => {
       ],
     );
     created.push(rows[0] as Record<string, unknown>);
+    try {
+      const row = rows[0] as Record<string, unknown>;
+      await upsertLedgerMovement({
+        companyId,
+        source: `ar:${String(row.id)}`,
+        direction: 'in',
+        status: 'previsto',
+        amount: partAmount,
+        competencyDate: ledgerTodayYmd(),
+        dueDate: due,
+        paymentMethod: 'fiado',
+        description: customerName
+          ? `A receber — ${customerName} (${i + 1}/${installmentCount})`
+          : `${description} (${i + 1}/${installmentCount})`,
+        categoryCode: 'RECEBER',
+        createdBy: auth.userId,
+      });
+    } catch (err) {
+      console.warn('[receivables] ledger installment:', err);
+    }
   }
 
   return c.json({
@@ -404,10 +448,11 @@ receivables.post('/:id/payments', async (c) => {
     [isFullyPaid ? total : newReceived, today, paymentMethod, nextStatus, id, companyId],
   );
 
-  await query(
+  const { rows: payIns } = await query(
     `INSERT INTO accounts_receivable_payments
        (company_id, receivable_id, amount, payment_date, payment_method, notes, register_id, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+     RETURNING id`,
     [
       companyId,
       id,
@@ -419,39 +464,41 @@ receivables.post('/:id/payments', async (c) => {
       auth.userId,
     ],
   );
+  const paymentId = String((payIns[0] as { id: string }).id);
+  const remainingAfter = Math.max(0, Math.round((total - (isFullyPaid ? total : newReceived)) * 100) / 100);
+
+  try {
+    await ledgerReceivablePayment({
+      companyId,
+      receivableId: id,
+      paymentId,
+      amount: applied,
+      remainingAfter,
+      saleId: row.sale_id != null ? String(row.sale_id) : null,
+      paymentMethod,
+      description: row.customer_name
+        ? `Recebimento — ${String(row.customer_name)}`
+        : 'Recebimento de título',
+      userId: auth.userId,
+    });
+  } catch (err) {
+    console.warn('[receivables] ledger:', err);
+  }
 
   // Se dinheiro/PIX e houver caixa aberto, credita o caixa
   if (paymentMethod === 'money' || paymentMethod === 'pix') {
-    let registerId = body.registerId?.trim() || null;
-    if (!registerId) {
-      const { rows: regs } = await query(
-        `SELECT id FROM cash_registers
-         WHERE company_id = $1 AND status = 'open'
-         ORDER BY opened_at DESC NULLS LAST, created_at DESC
-         LIMIT 1`,
-        [companyId],
-      );
-      registerId = regs[0] ? String((regs[0] as { id: string }).id) : null;
-    }
-    if (registerId) {
-      await query(
-        `UPDATE cash_registers SET current_balance = current_balance + $1 WHERE id = $2 AND company_id = $3`,
-        [applied, registerId, companyId],
-      );
-      await query(
-        `INSERT INTO cash_movements (company_id, register_id, type, amount, reason, performed_by_id, performed_by_name)
-         VALUES ($1, $2, 'deposit', $3, $4, $5, $6)`,
-        [
-          companyId,
-          registerId,
-          applied,
-          `Recebimento título #${id.slice(0, 8)}`,
-          auth.userId,
-          auth.fullName,
-        ],
-      ).catch(() => {
-        // cash_movements type check may not include deposit — ignore if fails
+    try {
+      await adjustOpenCashRegister({
+        companyId,
+        amount: applied,
+        type: 'deposit',
+        reason: `Recebimento título #${id.slice(0, 8)}`,
+        userId: auth.userId,
+        fullName: auth.fullName,
+        registerId: body.registerId,
       });
+    } catch (err) {
+      console.warn('[receivables] cash deposit:', err);
     }
   }
 

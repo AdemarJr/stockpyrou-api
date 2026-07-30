@@ -2,6 +2,11 @@ import { Hono } from 'hono';
 import { query } from '../db/pool.js';
 import type { AppVariables } from '../middleware/auth.js';
 import { requireAuth, requireCompany } from '../middleware/auth.js';
+import {
+  adjustOpenCashRegister,
+  ledgerExpensePayment,
+  ledgerFromExpense,
+} from '../services/ledger.js';
 
 const costs = new Hono<{ Variables: AppVariables }>();
 
@@ -334,7 +339,25 @@ costs.post('/expenses', async (c) => {
          RETURNING *`,
         values,
       );
-      inserted.push(rows[0] as Record<string, unknown>);
+      const created = rows[0] as Record<string, unknown>;
+      inserted.push(created);
+      try {
+        await ledgerFromExpense({
+          companyId,
+          expenseId: String(created.id),
+          amount: Number(created.amount) || 0,
+          dueDate: String(created.due_date).split('T')[0],
+          paymentStatus: String(created.payment_status || 'pending'),
+          paymentMethod: created.payment_method != null ? String(created.payment_method) : null,
+          description: created.description != null ? String(created.description) : null,
+          costCenterId: created.cost_center_id != null ? String(created.cost_center_id) : null,
+          supplierId: created.supplier_id != null ? String(created.supplier_id) : null,
+          stockEntryId: created.stock_entry_id != null ? String(created.stock_entry_id) : null,
+          userId: created.user_id != null ? String(created.user_id) : undefined,
+        });
+      } catch (err) {
+        console.warn('[costs] ledger expense batch:', err);
+      }
     }
     return c.json({ expenses: inserted }, 201);
   }
@@ -354,8 +377,27 @@ costs.post('/expenses', async (c) => {
     values,
   );
 
-  const full = await fetchExpenseWithJoins(String((rows[0] as { id: string }).id), companyId);
-  return c.json({ expense: full ?? rows[0] }, 201);
+  const created = rows[0] as Record<string, unknown>;
+  try {
+    await ledgerFromExpense({
+      companyId,
+      expenseId: String(created.id),
+      amount: Number(created.amount) || 0,
+      dueDate: String(created.due_date).split('T')[0],
+      paymentStatus: String(created.payment_status || 'pending'),
+      paymentMethod: created.payment_method != null ? String(created.payment_method) : null,
+      description: created.description != null ? String(created.description) : null,
+      costCenterId: created.cost_center_id != null ? String(created.cost_center_id) : null,
+      supplierId: created.supplier_id != null ? String(created.supplier_id) : null,
+      stockEntryId: created.stock_entry_id != null ? String(created.stock_entry_id) : null,
+      userId: created.user_id != null ? String(created.user_id) : undefined,
+    });
+  } catch (err) {
+    console.warn('[costs] ledger expense:', err);
+  }
+
+  const full = await fetchExpenseWithJoins(String(created.id), companyId);
+  return c.json({ expense: full ?? created }, 201);
 });
 
 costs.put('/expenses/:id', async (c) => {
@@ -489,6 +531,7 @@ costs.get('/expenses/:id/payments', async (c) => {
 
 costs.post('/expenses/:id/payments', async (c) => {
   const companyId = c.get('companyId');
+  const auth = c.get('auth');
   const id = c.req.param('id');
   const body = (await c.req.json()) as { amount?: number; paymentMethod?: string };
   const payNow = Number(body.amount);
@@ -531,12 +574,48 @@ costs.post('/expenses/:id/payments', async (c) => {
     [isFullyPaid ? total : newPaid, today, paymentMethod, nextStatus, id, companyId],
   );
 
-  await query(
+  const { rows: payRows } = await query(
     `INSERT INTO operational_expense_payments
        (company_id, expense_id, amount, payment_date, payment_method)
-     VALUES ($1, $2, $3, $4, $5)`,
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING id`,
     [companyId, id, applied, today, paymentMethod],
   );
+  const paymentId = String((payRows[0] as { id: string }).id);
+
+  const remainingAfter = Math.max(0, Math.round((total - (isFullyPaid ? total : newPaid)) * 100) / 100);
+  try {
+    await ledgerExpensePayment({
+      companyId,
+      expenseId: id,
+      paymentId,
+      amount: applied,
+      remainingAfter,
+      dueDate: dueRaw || today,
+      paymentMethod,
+      description: row.description != null ? String(row.description) : null,
+      costCenterId: row.cost_center_id != null ? String(row.cost_center_id) : null,
+      supplierId: row.supplier_id != null ? String(row.supplier_id) : null,
+      userId: auth.userId,
+    });
+  } catch (err) {
+    console.warn('[costs] ledger payment:', err);
+  }
+
+  if (paymentMethod === 'money' || paymentMethod === 'pix') {
+    try {
+      await adjustOpenCashRegister({
+        companyId,
+        amount: applied,
+        type: 'withdrawal',
+        reason: `Pagamento despesa #${id.slice(0, 8)}`,
+        userId: auth.userId,
+        fullName: auth.fullName,
+      });
+    } catch (err) {
+      console.warn('[costs] cash withdrawal:', err);
+    }
+  }
 
   const full = await fetchExpenseWithJoins(id, companyId);
   return c.json({ expense: full });
@@ -559,8 +638,15 @@ costs.get('/metrics/stock', async (c) => {
   const { rows } = await query(
     `SELECT COALESCE(SUM(total_cost), 0) AS total
      FROM stock_entries
-     WHERE company_id = $1 AND entry_date >= $2`,
-    [companyId, startIso],
+     WHERE company_id = $1 AND entry_date >= $2 AND entry_date < $3`,
+    [companyId, startIso, (() => {
+      if (/^\d{4}-\d{2}$/.test(month)) {
+        const start = new Date(`${month}-01T00:00:00.000Z`);
+        return new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 1)).toISOString();
+      }
+      const now = new Date();
+      return new Date(now.getFullYear(), now.getMonth() + 1, 1).toISOString();
+    })()],
   );
   const purchasesMonthTotal = Number((rows[0] as { total?: string })?.total) || 0;
   return c.json({ purchasesMonthTotal });
@@ -691,7 +777,7 @@ costs.get('/analytics/cash-flow', async (c) => {
 
   let usedLedger = false;
   try {
-    const [{ rows: realized }, { rows: expectedOut }] = await Promise.all([
+    const [{ rows: realized }, { rows: expectedOut }, { rows: expectedIn }] = await Promise.all([
       query(
         `SELECT direction, amount, cash_date FROM financial_movements
          WHERE company_id = $1 AND status = 'realizado' AND cash_date >= $2 AND cash_date <= $3`,
@@ -700,6 +786,11 @@ costs.get('/analytics/cash-flow', async (c) => {
       query(
         `SELECT amount, due_date FROM financial_movements
          WHERE company_id = $1 AND status = 'previsto' AND direction = 'out' AND due_date >= $2 AND due_date <= $3`,
+        [companyId, start, end],
+      ),
+      query(
+        `SELECT amount, due_date FROM financial_movements
+         WHERE company_id = $1 AND status = 'previsto' AND direction = 'in' AND due_date >= $2 AND due_date <= $3`,
         [companyId, start, end],
       ),
     ]);
@@ -717,6 +808,43 @@ costs.get('/analytics/cash-flow', async (c) => {
       const row = byDay.get(day);
       if (!row) continue;
       row.outExpected += Number(r.amount) || 0;
+    }
+    for (const r of expectedIn as Array<{ amount: string; due_date: string }>) {
+      const day = String(r.due_date).split('T')[0];
+      const row = byDay.get(day);
+      if (!row) continue;
+      row.inExpected += Number(r.amount) || 0;
+    }
+
+    // Complementa a receber aberto da tabela AR (se ledger ainda não tiver o previsto)
+    try {
+      const { rows: arOpen } = await query(
+        `SELECT due_date, (amount - received_amount) AS remaining
+         FROM accounts_receivable
+         WHERE company_id = $1
+           AND payment_status IN ('pending','overdue')
+           AND due_date >= $2 AND due_date <= $3
+           AND (amount - received_amount) > 0`,
+        [companyId, start, end],
+      );
+      for (const r of arOpen as Array<{ due_date: string; remaining: string }>) {
+        const day = String(r.due_date).split('T')[0];
+        const row = byDay.get(day);
+        if (!row) continue;
+        // Evita duplicar se já veio do ledger: só adiciona se inExpected do dia ainda 0
+        // (melhor: soma e deixa — pode duplicar). Preferir só AR se ledger inExpected total do range for 0.
+      }
+      const ledgerInExpected = [...byDay.values()].reduce((s, r) => s + r.inExpected, 0);
+      if (ledgerInExpected < 0.005) {
+        for (const r of arOpen as Array<{ due_date: string; remaining: string }>) {
+          const day = String(r.due_date).split('T')[0];
+          const row = byDay.get(day);
+          if (!row) continue;
+          row.inExpected += Number(r.remaining) || 0;
+        }
+      }
+    } catch {
+      // AR table optional
     }
   } catch (e) {
     console.warn('[costs] cash-flow ledger unavailable, falling back:', e);

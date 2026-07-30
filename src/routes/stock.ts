@@ -4,9 +4,49 @@ import { query } from '../db/pool.js';
 import { mapMovementRow, mapStockEntryRow } from '../mappers/stock.js';
 import type { AppVariables } from '../middleware/auth.js';
 import { requireAuth, requireCompany } from '../middleware/auth.js';
+import { ledgerFromExpense, todayYmdLocal } from '../services/ledger.js';
 
 const stock = new Hono<{ Variables: AppVariables }>();
 stock.use('*', requireAuth, requireCompany);
+
+async function resolvePurchaseExpenseDefaults(companyId: string): Promise<{
+  expenseTypeId: string | null;
+  costCenterId: string | null;
+}> {
+  const [{ rows: types }, { rows: centers }] = await Promise.all([
+    query(
+      `SELECT id FROM expense_types
+       WHERE company_id = $1 AND is_active = true
+         AND (name ILIKE '%insumo%' OR name ILIKE '%mercadoria%' OR name ILIKE '%food%' OR name ILIKE '%compra%')
+       ORDER BY name ASC LIMIT 1`,
+      [companyId],
+    ),
+    query(
+      `SELECT id FROM cost_centers
+       WHERE company_id = $1 AND is_active = true
+         AND (name ILIKE '%cmv%' OR name ILIKE '%variáv%' OR name ILIKE '%variav%' OR name ILIKE '%compra%')
+       ORDER BY name ASC LIMIT 1`,
+      [companyId],
+    ),
+  ]);
+  let expenseTypeId = types[0] ? String((types[0] as { id: string }).id) : null;
+  let costCenterId = centers[0] ? String((centers[0] as { id: string }).id) : null;
+  if (!expenseTypeId) {
+    const { rows } = await query(
+      `SELECT id FROM expense_types WHERE company_id = $1 AND is_active = true ORDER BY name ASC LIMIT 1`,
+      [companyId],
+    );
+    expenseTypeId = rows[0] ? String((rows[0] as { id: string }).id) : null;
+  }
+  if (!costCenterId) {
+    const { rows } = await query(
+      `SELECT id FROM cost_centers WHERE company_id = $1 AND is_active = true ORDER BY name ASC LIMIT 1`,
+      [companyId],
+    );
+    costCenterId = rows[0] ? String((rows[0] as { id: string }).id) : null;
+  }
+  return { expenseTypeId, costCenterId };
+}
 
 stock.get('/entries', async (c) => {
   const companyId = c.get('companyId');
@@ -29,7 +69,10 @@ stock.get('/entries/:id', async (c) => {
 
 stock.post('/entries', async (c) => {
   const companyId = c.get('companyId');
+  const auth = c.get('auth');
   const body = await c.req.json();
+  const createPayable = body.createPayable !== false && body.create_payable !== false;
+
   const { rows } = await query(
     `INSERT INTO stock_entries (
       company_id, product_id, supplier_id, quantity, unit_cost, total_cost,
@@ -47,7 +90,63 @@ stock.post('/entries', async (c) => {
       body.notes ?? null,
     ],
   );
-  return c.json({ entry: mapStockEntryRow(rows[0] as Record<string, unknown>) }, 201);
+  const entry = rows[0] as Record<string, unknown>;
+  let payableId: string | null = null;
+
+  const totalCost = parseFloat(String(body.totalPrice ?? entry.total_cost ?? 0)) || 0;
+  if (createPayable && totalCost > 0) {
+    try {
+      const { expenseTypeId, costCenterId } = await resolvePurchaseExpenseDefaults(companyId);
+      if (expenseTypeId && costCenterId) {
+        const due =
+          typeof body.dueDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(body.dueDate)
+            ? body.dueDate
+            : todayYmdLocal();
+        const { rows: expRows } = await query(
+          `INSERT INTO operational_expenses (
+             company_id, expense_type_id, cost_center_id, amount, description,
+             due_date, payment_status, paid_amount, supplier_id, stock_entry_id, user_id
+           ) VALUES ($1,$2,$3,$4,$5,$6,'pending',0,$7,$8,$9)
+           RETURNING *`,
+          [
+            companyId,
+            expenseTypeId,
+            costCenterId,
+            totalCost,
+            body.notes || `Compra estoque #${String(entry.id).slice(0, 8)}`,
+            due,
+            body.supplierId ?? entry.supplier_id ?? null,
+            entry.id,
+            auth.userId,
+          ],
+        );
+        const exp = expRows[0] as Record<string, unknown>;
+        payableId = String(exp.id);
+        await ledgerFromExpense({
+          companyId,
+          expenseId: payableId,
+          amount: totalCost,
+          dueDate: due,
+          paymentStatus: 'pending',
+          description: String(exp.description || 'Compra estoque'),
+          costCenterId,
+          supplierId: body.supplierId ?? null,
+          stockEntryId: String(entry.id),
+          userId: auth.userId,
+        });
+      }
+    } catch (err) {
+      console.warn('[stock/entries] auto AP:', err);
+    }
+  }
+
+  return c.json(
+    {
+      entry: mapStockEntryRow(entry),
+      payableId,
+    },
+    201,
+  );
 });
 
 stock.put('/entries/:id', async (c) => {
@@ -137,28 +236,34 @@ stock.post('/movements', async (c) => {
 stock.post('/deduct', async (c) => {
   const companyId = c.get('companyId');
   const body = await c.req.json();
-  const { rows } = await query<{
-    applied: boolean;
-    movement_id: string | null;
-    new_stock: string | number;
-  }>(
-    `SELECT * FROM deduct_stock_once($1,$2,$3,$4,$5,$6,$7)`,
-    [
-      companyId,
-      body.productId,
-      body.quantity,
-      body.source,
-      body.notes ?? null,
-      body.movementType ?? 'venda',
-      body.movementDate ?? new Date().toISOString(),
-    ],
-  );
-  const row = rows[0];
-  return c.json({
-    applied: row?.applied === true,
-    movementId: row?.movement_id ?? null,
-    newStock: Number(row?.new_stock ?? 0) || 0,
-  });
+  try {
+    const { rows } = await query<{
+      applied: boolean;
+      movement_id: string | null;
+      new_stock: string | number;
+    }>(
+      `SELECT * FROM deduct_stock_once($1,$2,$3,$4,$5,$6,$7)`,
+      [
+        companyId,
+        body.productId,
+        body.quantity,
+        body.source,
+        body.notes ?? null,
+        body.movementType ?? 'venda',
+        body.movementDate ?? new Date().toISOString(),
+      ],
+    );
+    const row = rows[0];
+    return c.json({
+      applied: row?.applied === true,
+      movementId: row?.movement_id ?? null,
+      newStock: Number(row?.new_stock ?? 0) || 0,
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error('[stock/deduct]', msg);
+    return c.json({ error: msg }, 500);
+  }
 });
 
 export default stock;

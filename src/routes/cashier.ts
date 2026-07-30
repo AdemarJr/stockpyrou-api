@@ -4,6 +4,7 @@ import { resolveCompanyId } from '../auth/resolve-company.js';
 import type { AppVariables } from '../middleware/auth.js';
 import { requireAuth } from '../middleware/auth.js';
 import { createReceivableFromSale } from './receivables.js';
+import { ledgerFromSale } from '../services/ledger.js';
 
 function calculatePaymentBreakdown(sales: Array<Record<string, unknown>>) {
   const breakdown: Record<string, { count: number; total: number }> = {
@@ -187,6 +188,28 @@ cashier.post('/sale', requireAuth, async (c) => {
     } catch (err) {
       console.error('[cashier/sale] accounts_receivable:', err);
     }
+  }
+
+  // Ledger financeiro
+  try {
+    const details =
+      paymentDetails && typeof paymentDetails === 'object'
+        ? (paymentDetails as { dueDate?: string; customerName?: string })
+        : null;
+    const saleDay = newSale.timestamp
+      ? String(newSale.timestamp).split('T')[0]
+      : undefined;
+    await ledgerFromSale({
+      companyId,
+      saleId: String(newSale.id),
+      total: parseFloat(String(total)),
+      paymentMethod: String(paymentMethod || 'money'),
+      paymentDetails: details,
+      saleDateYmd: saleDay,
+      userId: auth.userId,
+    });
+  } catch (err) {
+    console.error('[cashier/sale] ledger:', err);
   }
 
   const sale = {
