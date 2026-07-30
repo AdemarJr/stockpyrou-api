@@ -15,6 +15,7 @@ import costsRoutes from './routes/costs.js';
 import adminRoutes from './routes/admin.js';
 import usersRoutes from './routes/users.js';
 import zigRoutes from './routes/zig.js';
+import receivablesRoutes from './routes/receivables.js';
 
 const app = new Hono();
 
@@ -87,6 +88,7 @@ app.route('/api/costs', costsRoutes);
 app.route('/api/admin', adminRoutes);
 app.route('/api/users', usersRoutes);
 app.route('/api/zig', zigRoutes);
+app.route('/api/receivables', receivablesRoutes);
 
 const port = Number(process.env.PORT) || 3001;
 const hostname = process.env.HOST?.trim() || '0.0.0.0';

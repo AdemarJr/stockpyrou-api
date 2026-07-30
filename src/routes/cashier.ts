@@ -3,6 +3,7 @@ import { query } from '../db/pool.js';
 import { resolveCompanyId } from '../auth/resolve-company.js';
 import type { AppVariables } from '../middleware/auth.js';
 import { requireAuth } from '../middleware/auth.js';
+import { createReceivableFromSale } from './receivables.js';
 
 function calculatePaymentBreakdown(sales: Array<Record<string, unknown>>) {
   const breakdown: Record<string, { count: number; total: number }> = {
@@ -11,6 +12,7 @@ function calculatePaymentBreakdown(sales: Array<Record<string, unknown>>) {
     credit: { count: 0, total: 0 },
     debit: { count: 0, total: 0 },
     fiado: { count: 0, total: 0 },
+    boleto: { count: 0, total: 0 },
   };
   for (const sale of sales) {
     const method = String(sale.payment_method ?? sale.paymentMethod ?? 'money');
@@ -165,6 +167,26 @@ cashier.post('/sale', requireAuth, async (c) => {
       newBalance,
       registerId,
     ]);
+  }
+
+  // Fiado / boleto → Contas a Receber
+  if (paymentMethod === 'fiado' || paymentMethod === 'boleto') {
+    const details =
+      paymentDetails && typeof paymentDetails === 'object'
+        ? (paymentDetails as { dueDate?: string; customerName?: string })
+        : null;
+    try {
+      await createReceivableFromSale({
+        companyId,
+        saleId: String(newSale.id),
+        amount: parseFloat(String(total)),
+        paymentMethod: String(paymentMethod),
+        paymentDetails: details,
+        userId: auth.userId,
+      });
+    } catch (err) {
+      console.error('[cashier/sale] accounts_receivable:', err);
+    }
   }
 
   const sale = {

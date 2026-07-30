@@ -581,8 +581,8 @@ costs.get('/metrics/financial-snapshot', async (c) => {
 
   const { rows: salesRows } = await query(
     `SELECT
-       COALESCE(SUM(CASE WHEN payment_method <> 'fiado' THEN total ELSE 0 END), 0) AS revenue,
-       COALESCE(SUM(CASE WHEN payment_method = 'fiado' THEN total ELSE 0 END), 0) AS fiado_receivable
+       COALESCE(SUM(CASE WHEN payment_method NOT IN ('fiado', 'boleto') THEN total ELSE 0 END), 0) AS revenue,
+       COALESCE(SUM(CASE WHEN payment_method IN ('fiado', 'boleto') THEN total ELSE 0 END), 0) AS fiado_from_sales
      FROM sales
      WHERE company_id = $1 AND "timestamp" >= $2 AND "timestamp" < $3`,
     [companyId, startIso, endIso],
@@ -604,7 +604,21 @@ costs.get('/metrics/financial-snapshot', async (c) => {
   }
 
   const revenue = Number((salesRows[0] as { revenue?: string })?.revenue) || 0;
-  const fiadoReceivable = Number((salesRows[0] as { fiado_receivable?: string })?.fiado_receivable) || 0;
+  let fiadoReceivable = Number((salesRows[0] as { fiado_from_sales?: string })?.fiado_from_sales) || 0;
+  try {
+    const { rows: arRows } = await query(
+      `SELECT COALESCE(SUM(amount - received_amount), 0) AS open_ar
+       FROM accounts_receivable
+       WHERE company_id = $1
+         AND payment_status IN ('pending', 'overdue')
+         AND due_date >= $2::date
+         AND due_date < $3::date`,
+      [companyId, `${month}-01`, endIso.slice(0, 10)],
+    );
+    fiadoReceivable = Number((arRows[0] as { open_ar?: string })?.open_ar) || 0;
+  } catch {
+    // tabela pode não existir em ambientes antigos — mantém fallback sales
+  }
 
   return c.json({ month, revenue, cogs, fiadoReceivable });
 });
@@ -733,7 +747,7 @@ costs.get('/analytics/cash-flow', async (c) => {
     for (const s of sales as Array<{ total: string; payment_method: string; timestamp: string; payment_details: unknown }>) {
       const method = String(s.payment_method || '');
       const day = String(s.timestamp).split('T')[0];
-      if (method === 'fiado') {
+      if (method === 'fiado' || method === 'boleto') {
         const details = s.payment_details as { dueDate?: string } | null;
         const due = details?.dueDate && /^\d{4}-\d{2}-\d{2}$/.test(details.dueDate)
           ? details.dueDate
