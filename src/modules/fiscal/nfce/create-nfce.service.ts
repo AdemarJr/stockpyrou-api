@@ -107,10 +107,29 @@ export async function getNfceRaw(companyId: string, id: string) {
   return (rows[0] as Record<string, unknown>) || null;
 }
 
-export async function listNfce(companyId: string, limit = 50) {
+export async function listNfce(
+  companyId: string,
+  opts: { limit?: number; from?: string | null; to?: string | null; status?: string | null } = {},
+) {
+  const limit = Math.min(Math.max(Number(opts.limit) || 50, 1), 200);
+  const params: unknown[] = [companyId];
+  let where = 'WHERE company_id = $1';
+  if (opts.from) {
+    params.push(opts.from);
+    where += ` AND COALESCE(data_emissao, created_at) >= $${params.length}::timestamptz`;
+  }
+  if (opts.to) {
+    params.push(opts.to);
+    where += ` AND COALESCE(data_emissao, created_at) < $${params.length}::timestamptz`;
+  }
+  if (opts.status) {
+    params.push(opts.status);
+    where += ` AND status = $${params.length}`;
+  }
+  params.push(limit);
   const { rows } = await query(
-    `SELECT * FROM nfce WHERE company_id = $1 ORDER BY created_at DESC LIMIT $2`,
-    [companyId, limit],
+    `SELECT * FROM nfce ${where} ORDER BY COALESCE(data_emissao, created_at) DESC LIMIT $${params.length}`,
+    params,
   );
   return rows.map((r) => mapNfce(r as Record<string, unknown>));
 }
@@ -121,6 +140,93 @@ export async function getNfceBySale(companyId: string, saleId: string) {
     [companyId, saleId],
   );
   return rows.map((r) => mapNfce(r as Record<string, unknown>));
+}
+
+/** Vendas do período sem NFC-e AUTHORIZED (pendentes de emissão / reemissão). */
+export async function listPendingNfceSales(
+  companyId: string,
+  opts: {
+    from: string;
+    to: string;
+    limit?: number;
+    /** requested = marcadas para NFC-e ou com tentativa falha; all = qualquer venda sem autorizada */
+    mode?: 'requested' | 'all';
+  },
+) {
+  const limit = Math.min(Math.max(Number(opts.limit) || 100, 1), 300);
+  const mode = opts.mode === 'all' ? 'all' : 'requested';
+  const modeFilter =
+    mode === 'all'
+      ? 'TRUE'
+      : `(
+          COALESCE(s.emit_nfce, false) = true
+          OR COALESCE((s.payment_details->>'emitNfce')::boolean, false) = true
+          OR EXISTS (
+            SELECT 1 FROM nfce n
+            WHERE n.sale_id = s.id AND n.company_id = s.company_id
+              AND n.status <> 'AUTHORIZED' AND n.status <> 'CANCELLED'
+          )
+        )`;
+
+  const { rows } = await query(
+    `SELECT
+       s.id,
+       s.total,
+       s.payment_method,
+       s.timestamp,
+       s.emit_nfce,
+       s.payment_details,
+       s.customer_id,
+       c.name AS customer_name,
+       (
+         SELECT n.status FROM nfce n
+         WHERE n.sale_id = s.id AND n.company_id = s.company_id
+         ORDER BY n.created_at DESC LIMIT 1
+       ) AS last_nfce_status,
+       (
+         SELECT n.id FROM nfce n
+         WHERE n.sale_id = s.id AND n.company_id = s.company_id
+         ORDER BY n.created_at DESC LIMIT 1
+       ) AS last_nfce_id,
+       (
+         SELECT n.motivo_status FROM nfce n
+         WHERE n.sale_id = s.id AND n.company_id = s.company_id
+         ORDER BY n.created_at DESC LIMIT 1
+       ) AS last_nfce_motivo
+     FROM sales s
+     LEFT JOIN customers c ON c.id = s.customer_id
+     WHERE s.company_id = $1
+       AND s.timestamp >= $2::timestamptz
+       AND s.timestamp < $3::timestamptz
+       AND NOT EXISTS (
+         SELECT 1 FROM nfce n
+         WHERE n.sale_id = s.id AND n.company_id = s.company_id AND n.status = 'AUTHORIZED'
+       )
+       AND ${modeFilter}
+     ORDER BY s.timestamp DESC
+     LIMIT $4`,
+    [companyId, opts.from, opts.to, limit],
+  );
+
+  return rows.map((r) => {
+    const row = r as Record<string, unknown>;
+    const pd = row.payment_details as Record<string, unknown> | null;
+    return {
+      saleId: String(row.id),
+      total: Number(row.total || 0),
+      paymentMethod: row.payment_method != null ? String(row.payment_method) : null,
+      timestamp: row.timestamp,
+      emitNfce:
+        row.emit_nfce === true ||
+        pd?.emitNfce === true ||
+        String(pd?.emitNfce || '').toLowerCase() === 'true',
+      customerId: row.customer_id != null ? String(row.customer_id) : null,
+      customerName: row.customer_name != null ? String(row.customer_name) : null,
+      lastNfceStatus: row.last_nfce_status != null ? String(row.last_nfce_status) : null,
+      lastNfceId: row.last_nfce_id != null ? String(row.last_nfce_id) : null,
+      lastNfceMotivo: row.last_nfce_motivo != null ? String(row.last_nfce_motivo) : null,
+    };
+  });
 }
 
 /**

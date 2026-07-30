@@ -17,6 +17,7 @@ import {
   getNfceBySale,
   getNfceRaw,
   listNfce,
+  listPendingNfceSales,
 } from './nfce/create-nfce.service.js';
 
 export {
@@ -33,6 +34,7 @@ export {
   getNfceBySale,
   getNfceRaw,
   listNfce,
+  listPendingNfceSales,
 };
 
 export type { UpsertFiscalConfigInput, FiscalEnvironment };

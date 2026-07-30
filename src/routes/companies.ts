@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { kvGet, kvRecord } from '../db/kv.js';
+import { kvGet } from '../db/kv.js';
 import { query } from '../db/pool.js';
 import { resolveCompanyId } from '../auth/resolve-company.js';
 import { getUserProfileByToken } from '../auth/login-service.js';
@@ -44,9 +44,9 @@ companies.get('/me', async (c) => {
   );
   if (!companyId) return c.json({ error: 'Company not found' }, 404);
 
-  const kvCompany = kvRecord(await kvGet(`company:${companyId}`));
+  const kvCompany = await kvGet(`company:${companyId}`);
   if (kvCompany) {
-    return c.json({ company: mapCompany(kvCompany) });
+    return c.json({ company: mapCompany(kvCompany as Record<string, unknown>) });
   }
 
   const { rows } = await query('SELECT * FROM companies WHERE id = $1 LIMIT 1', [companyId]);
@@ -88,6 +88,17 @@ companies.get('/:id', requireAuth, async (c) => {
 
 companies.post('/', requireAuth, async (c) => {
   const auth = c.get('auth');
+  // Somente Super Admin pode criar novas empresas (tenants).
+  // Clientes/admins de empresa usam apenas as organizações vinculadas pelo Super Admin.
+  if (auth.role !== 'superadmin' && auth.role !== 'super_admin') {
+    return c.json(
+      {
+        error:
+          'Somente o Super Admin pode criar novas empresas. Solicite o cadastro à equipe responsável.',
+      },
+      403,
+    );
+  }
   const body = await c.req.json();
   const { rows } = await query(
     'INSERT INTO companies (name, cnpj) VALUES ($1, $2) RETURNING *',
@@ -99,6 +110,59 @@ companies.post('/', requireAuth, async (c) => {
     [auth.userId, company.id, 'admin'],
   );
   return c.json({ company: mapCompany(company) }, 201);
+});
+
+/** Atualiza nome/CNPJ da empresa (admin da empresa ou Super Admin). */
+companies.patch('/:id', requireAuth, async (c) => {
+  const auth = c.get('auth');
+  const companyId = c.req.param('id');
+  const isSuper = auth.role === 'superadmin' || auth.role === 'super_admin';
+  if (!isSuper) {
+    const canManage =
+      !!auth.permissions?.canManageSettings || auth.role === 'admin';
+    if (!canManage) {
+      return c.json({ error: 'Sem permissão para alterar esta empresa' }, 403);
+    }
+    const { rows: links } = await query<{ company_id: string }>(
+      'SELECT company_id FROM user_companies WHERE user_id = $1 AND company_id = $2 LIMIT 1',
+      [auth.userId, companyId],
+    );
+    const belongs =
+      links.length > 0 ||
+      auth.companyId === companyId ||
+      c.req.header('X-Company-Id') === companyId;
+    if (!belongs) {
+      return c.json({ error: 'Sem permissão para alterar esta empresa' }, 403);
+    }
+  }
+
+  const body = (await c.req.json().catch(() => ({}))) as { name?: string; cnpj?: string | null };
+  const name = body.name != null ? String(body.name).trim() : undefined;
+  const cnpj = body.cnpj !== undefined ? (body.cnpj == null ? null : String(body.cnpj).trim()) : undefined;
+  if (name !== undefined && name.length < 2) {
+    return c.json({ error: 'Nome da empresa inválido' }, 400);
+  }
+
+  const sets: string[] = [];
+  const params: unknown[] = [];
+  if (name !== undefined) {
+    params.push(name);
+    sets.push(`name = $${params.length}`);
+  }
+  if (cnpj !== undefined) {
+    params.push(cnpj);
+    sets.push(`cnpj = $${params.length}`);
+  }
+  if (sets.length === 0) {
+    return c.json({ error: 'Nenhum campo para atualizar' }, 400);
+  }
+  params.push(companyId);
+  const { rows } = await query(
+    `UPDATE companies SET ${sets.join(', ')} WHERE id = $${params.length} RETURNING *`,
+    params,
+  );
+  if (!rows[0]) return c.json({ error: 'Empresa não encontrada' }, 404);
+  return c.json({ company: mapCompany(rows[0] as Record<string, unknown>) });
 });
 
 companies.get('/:id/status', requireAuth, async (c) => {

@@ -15,6 +15,7 @@ import {
   getNfceBySale,
   getNfceRaw,
   listNfce,
+  listPendingNfceSales,
   type FiscalEnvironment,
 } from '../modules/fiscal/index.js';
 
@@ -203,12 +204,15 @@ fiscal.get('/endpoints', async (c) => {
   return c.json({ success: true, ambiente, endpoints });
 });
 
-/** Lista NFC-e recentes. */
+/** Lista NFC-e recentes (filtros opcionais: from, to, status, limit). */
 fiscal.get('/nfce', async (c) => {
   const companyId = c.get('companyId');
   const limit = Math.min(Number(c.req.query('limit') || 50), 200);
+  const from = c.req.query('from') || null;
+  const to = c.req.query('to') || null;
+  const status = c.req.query('status') || null;
   try {
-    const items = await listNfce(companyId, limit);
+    const items = await listNfce(companyId, { limit, from, to, status });
     return c.json({ success: true, nfce: items });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -216,6 +220,36 @@ fiscal.get('/nfce', async (c) => {
       return c.json({
         success: true,
         nfce: [],
+        needsMigration: true,
+        error: 'Execute scripts/add_nfce_emission.sql no banco',
+      });
+    }
+    return c.json({ error: message }, 500);
+  }
+});
+
+/**
+ * Vendas sem NFC-e autorizada no período (para emissão em lote / fim do mês).
+ * Query: from, to (ISO), mode=requested|all, limit
+ */
+fiscal.get('/nfce/pending-sales', async (c) => {
+  const companyId = c.get('companyId');
+  const now = new Date();
+  const defaultFrom = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
+  const defaultTo = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)).toISOString();
+  const from = c.req.query('from') || defaultFrom;
+  const to = c.req.query('to') || defaultTo;
+  const mode = (c.req.query('mode') === 'all' ? 'all' : 'requested') as 'requested' | 'all';
+  const limit = Math.min(Number(c.req.query('limit') || 100), 300);
+  try {
+    const sales = await listPendingNfceSales(companyId, { from, to, mode, limit });
+    return c.json({ success: true, from, to, mode, sales });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (/relation .* does not exist/i.test(message)) {
+      return c.json({
+        success: true,
+        sales: [],
         needsMigration: true,
         error: 'Execute scripts/add_nfce_emission.sql no banco',
       });
