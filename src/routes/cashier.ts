@@ -134,12 +134,40 @@ cashier.post('/sale', requireAuth, async (c) => {
       ? (paymentDetails as Record<string, unknown>)
       : {};
   const emitNfce = detailsObj.emitNfce === true || detailsObj.emit_nfce === true;
+  const customerIdRaw =
+    typeof detailsObj.customerId === 'string'
+      ? detailsObj.customerId.trim()
+      : typeof detailsObj.customer_id === 'string'
+        ? detailsObj.customer_id.trim()
+        : '';
+  const customerId = customerIdRaw || null;
+
+  // Fiado/boleto e NFC-e exigem cliente com documento
+  const needsCustomer =
+    paymentMethod === 'fiado' ||
+    paymentMethod === 'boleto' ||
+    emitNfce;
+  if (needsCustomer) {
+    const customerName = String(detailsObj.customerName || detailsObj.customer_name || '').trim();
+    const customerDocument = String(
+      detailsObj.customerDocument || detailsObj.customer_document || '',
+    ).replace(/\D/g, '');
+    if (!customerId && (!customerName || (customerDocument.length !== 11 && customerDocument.length !== 14))) {
+      return c.json(
+        {
+          error:
+            'Informe o cliente com nome e CPF/CNPJ (obrigatório para fiado/boleto e NFC-e)',
+        },
+        400,
+      );
+    }
+  }
 
   let newSale: Record<string, unknown>;
   try {
     const { rows } = await query(
-      `INSERT INTO sales (company_id, register_id, cashier_id, cashier_name, total, payment_method, payment_details, items, client_request_id, emit_nfce)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+      `INSERT INTO sales (company_id, register_id, cashier_id, cashier_name, total, payment_method, payment_details, items, client_request_id, emit_nfce, customer_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
       [
         companyId,
         registerId,
@@ -147,17 +175,18 @@ cashier.post('/sale', requireAuth, async (c) => {
         auth.fullName,
         parseFloat(String(total)),
         paymentMethod,
-        JSON.stringify({ ...detailsObj, emitNfce }),
+        JSON.stringify({ ...detailsObj, emitNfce, customerId }),
         JSON.stringify(items),
         clientReq,
         emitNfce,
+        customerId,
       ],
     );
     newSale = rows[0] as Record<string, unknown>;
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    // Coluna emit_nfce ainda não migrada — grava sem ela
-    if (/emit_nfce/i.test(msg)) {
+    // Colunas novas ainda não migradas — grava sem elas
+    if (/emit_nfce|customer_id/i.test(msg)) {
       try {
         const { rows } = await query(
           `INSERT INTO sales (company_id, register_id, cashier_id, cashier_name, total, payment_method, payment_details, items, client_request_id)
@@ -169,7 +198,7 @@ cashier.post('/sale', requireAuth, async (c) => {
             auth.fullName,
             parseFloat(String(total)),
             paymentMethod,
-            JSON.stringify({ ...detailsObj, emitNfce }),
+            JSON.stringify({ ...detailsObj, emitNfce, customerId }),
             JSON.stringify(items),
             clientReq,
           ],
