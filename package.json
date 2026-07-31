@@ -1,6 +1,6 @@
 {
   "name": "stockpyrou-api",
-  "version": "0.2.11",
+  "version": "0.2.12",
   "private": true,
   "type": "module",
   "scripts": {
@@ -19,7 +19,8 @@
     "hono": "^4.7.10",
     "node-forge": "^1.4.0",
     "pg": "^8.16.0",
-    "tsx": "^4.19.4"
+    "tsx": "^4.19.4",
+    "xml-crypto": "^6.1.2"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",

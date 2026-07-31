@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import forge from 'node-forge';
+import { SignedXml } from 'xml-crypto';
 import { decryptBytes, decryptSecret } from '../secrets.js';
 import { query } from '../../../db/pool.js';
 
@@ -310,9 +311,14 @@ export async function loadCompanyCertificate(companyId: string): Promise<LoadedC
   };
 }
 
+const C14N = 'http://www.w3.org/TR/2001/REC-xml-c14n-20010315';
+const RSA_SHA1 = 'http://www.w3.org/2000/09/xmldsig#rsa-sha1';
+const SHA1 = 'http://www.w3.org/2000/09/xmldsig#sha1';
+const ENVELOPED = 'http://www.w3.org/2000/09/xmldsig#enveloped-signature';
+
 /**
- * Assinatura XMLDSig enveloped (RSA-SHA1) no elemento informado (ex.: infNFe).
- * Compatível com o padrão NF-e/NFC-e.
+ * Assinatura XMLDSig enveloped (RSA-SHA1 + C14N 1.0) — padrão NF-e/NFC-e.
+ * Usa xml-crypto (canonicalização correta). Assinatura sem C14N gera rejeição 298.
  */
 export function signXmlEnveloped(
   xml: string,
@@ -324,65 +330,40 @@ export function signXmlEnveloped(
     working = working.replace(/^<\?xml[^?]*\?>\s*/i, '');
   }
 
-  const idAttr = `Id="${elementId}"`;
-  if (!working.includes(idAttr) && !working.includes(`Id='${elementId}'`)) {
+  if (!working.includes(`Id="${elementId}"`) && !working.includes(`Id='${elementId}'`)) {
     throw new Error(`Elemento com Id=${elementId} não encontrado no XML`);
   }
 
+  const escapedId = elementId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const tagMatch = working.match(
-    new RegExp(
-      `<(?:\\w+:)?(infNFe|infEvento|infInut)[^>]*Id=["']${elementId}["'][^>]*>[\\s\\S]*?<\\/(?:\\w+:)?\\1>`,
-    ),
+    new RegExp(`<(?:\\w+:)?(infNFe|infEvento|infInut)[^>]*Id=["']${escapedId}["'][^>]*>`),
   );
-  if (!tagMatch) throw new Error('Não foi possível localizar o bloco a assinar');
+  const localName = tagMatch?.[1] || 'infNFe';
 
-  const referenceUri = `#${elementId}`;
-  const digestValue = forge.md.sha1
-    .create()
-    .update(forge.util.encodeUtf8(tagMatch[0]))
-    .digest()
-    .toHex();
-  const digestB64 = forge.util.encode64(forge.util.hexToBytes(digestValue));
+  const sig = new SignedXml({
+    privateKey: cert.privateKeyPem,
+    publicCert: cert.certificatePem,
+    signatureAlgorithm: RSA_SHA1,
+    canonicalizationAlgorithm: C14N,
+    getKeyInfoContent: SignedXml.getKeyInfoContent,
+    idAttribute: 'Id',
+  });
 
-  const signedInfo =
-    `<SignedInfo xmlns="http://www.w3.org/2000/09/xmldsig#">` +
-    `<CanonicalizationMethod Algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315"/>` +
-    `<SignatureMethod Algorithm="http://www.w3.org/2000/09/xmldsig#rsa-sha1"/>` +
-    `<Reference URI="${referenceUri}">` +
-    `<Transforms>` +
-    `<Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature"/>` +
-    `<Transform Algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315"/>` +
-    `</Transforms>` +
-    `<DigestMethod Algorithm="http://www.w3.org/2000/09/xmldsig#sha1"/>` +
-    `<DigestValue>${digestB64}</DigestValue>` +
-    `</Reference>` +
-    `</SignedInfo>`;
+  sig.addReference({
+    xpath: `//*[@Id='${elementId}']`,
+    uri: `#${elementId}`,
+    transforms: [ENVELOPED, C14N],
+    digestAlgorithm: SHA1,
+  });
 
-  const md = forge.md.sha1.create();
-  md.update(forge.util.encodeUtf8(signedInfo), 'utf8');
-  const signatureBytes = (cert.privateKey as forge.pki.rsa.PrivateKey).sign(md);
-  const signatureB64 = forge.util.encode64(signatureBytes);
+  sig.computeSignature(working, {
+    location: {
+      reference: `//*[local-name(.)='${localName}']`,
+      action: 'after',
+    },
+  });
 
-  const certDer = forge.asn1.toDer(forge.pki.certificateToAsn1(cert.certificate)).getBytes();
-  const certB64 = forge.util.encode64(certDer);
-
-  const signatureXml =
-    `<Signature xmlns="http://www.w3.org/2000/09/xmldsig#">` +
-    signedInfo +
-    `<SignatureValue>${signatureB64}</SignatureValue>` +
-    `<KeyInfo><X509Data><X509Certificate>${certB64}</X509Certificate></X509Data></KeyInfo>` +
-    `</Signature>`;
-
-  if (working.includes('</NFe>')) {
-    return working.replace('</NFe>', `${signatureXml}</NFe>`);
-  }
-  if (working.includes('</evento>')) {
-    return working.replace('</evento>', `${signatureXml}</evento>`);
-  }
-  if (working.includes('</inutNFe>')) {
-    return working.replace('</inutNFe>', `${signatureXml}</inutNFe>`);
-  }
-  return working + signatureXml;
+  return sig.getSignedXml();
 }
 
 /**
