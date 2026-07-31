@@ -57,6 +57,89 @@ export interface NfceBuildInput {
   qrCodeBaseUrl: string;
 }
 
+/** Alíquotas de transição 2026 (NT 2025.002) — tributação integral. */
+const IBS_UF_RATE = 0.1; // 0,10%
+const IBS_MUN_RATE = 0; // 0,00%
+const CBS_RATE = 0.9; // 0,90%
+
+function rateXml(ratePercent: number): string {
+  // TDec_0302_04RTC: 0 | 0.xx[xx] | n.xx[xx]
+  return ratePercent === 0 ? '0.00' : ratePercent.toFixed(2);
+}
+
+function taxFromBase(vBC: number, ratePercent: number): number {
+  return Math.round((vBC * ratePercent) / 100 * 100) / 100;
+}
+
+function buildIbsCbsItemXml(vBC: number): {
+  xml: string;
+  vBC: number;
+  vIBSUF: number;
+  vIBSMun: number;
+  vIBS: number;
+  vCBS: number;
+} {
+  const vIBSUF = taxFromBase(vBC, IBS_UF_RATE);
+  const vIBSMun = taxFromBase(vBC, IBS_MUN_RATE);
+  const vIBS = Math.round((vIBSUF + vIBSMun) * 100) / 100;
+  const vCBS = taxFromBase(vBC, CBS_RATE);
+  const xml =
+    `<IBSCBS>` +
+    `<CST>000</CST>` +
+    `<cClassTrib>000001</cClassTrib>` +
+    `<gIBSCBS>` +
+    `<vBC>${money(vBC)}</vBC>` +
+    `<gIBSUF>` +
+    `<pIBSUF>${rateXml(IBS_UF_RATE)}</pIBSUF>` +
+    `<vIBSUF>${money(vIBSUF)}</vIBSUF>` +
+    `</gIBSUF>` +
+    `<gIBSMun>` +
+    `<pIBSMun>${rateXml(IBS_MUN_RATE)}</pIBSMun>` +
+    `<vIBSMun>${money(vIBSMun)}</vIBSMun>` +
+    `</gIBSMun>` +
+    `<vIBS>${money(vIBS)}</vIBS>` +
+    `<gCBS>` +
+    `<pCBS>${rateXml(CBS_RATE)}</pCBS>` +
+    `<vCBS>${money(vCBS)}</vCBS>` +
+    `</gCBS>` +
+    `</gIBSCBS>` +
+    `</IBSCBS>`;
+  return { xml, vBC, vIBSUF, vIBSMun, vIBS, vCBS };
+}
+
+function buildIbsCbsTotXml(sums: {
+  vBC: number;
+  vIBSUF: number;
+  vIBSMun: number;
+  vIBS: number;
+  vCBS: number;
+}): string {
+  return (
+    `<IBSCBSTot>` +
+    `<vBCIBSCBS>${money(sums.vBC)}</vBCIBSCBS>` +
+    `<gIBS>` +
+    `<gIBSUF>` +
+    `<vDif>0.00</vDif><vDevTrib>0.00</vDevTrib>` +
+    `<vIBSUF>${money(sums.vIBSUF)}</vIBSUF>` +
+    `</gIBSUF>` +
+    `<gIBSMun>` +
+    `<vDif>0.00</vDif><vDevTrib>0.00</vDevTrib>` +
+    `<vIBSMun>${money(sums.vIBSMun)}</vIBSMun>` +
+    `</gIBSMun>` +
+    `<vIBS>${money(sums.vIBS)}</vIBS>` +
+    `<vCredPres>0.00</vCredPres>` +
+    `<vCredPresCondSus>0.00</vCredPresCondSus>` +
+    `</gIBS>` +
+    `<gCBS>` +
+    `<vDif>0.00</vDif><vDevTrib>0.00</vDevTrib>` +
+    `<vCBS>${money(sums.vCBS)}</vCBS>` +
+    `<vCredPres>0.00</vCredPres>` +
+    `<vCredPresCondSus>0.00</vCredPresCondSus>` +
+    `</gCBS>` +
+    `</IBSCBSTot>`
+  );
+}
+
 export function buildNfceXml(input: NfceBuildInput): string {
   const infId = `NFe${input.accessKey}`;
   const dhEmi = formatNFeDate(input.emissionDate);
@@ -67,6 +150,8 @@ export function buildNfceXml(input: NfceBuildInput): string {
   const isHomolog = input.ambiente === '2';
   const cMun = nfeCodigoMunicipio(input.emit.codigoMunicipio);
   const cep = onlyDigits(input.emit.cep).padStart(8, '0').slice(0, 8);
+
+  const ibsSums = { vBC: 0, vIBSUF: 0, vIBSMun: 0, vIBS: 0, vCBS: 0 };
 
   const det = input.items
     .map((it) => {
@@ -81,7 +166,15 @@ export function buildNfceXml(input: NfceBuildInput): string {
       const unidade = nfeUnit(it.unidade);
       const q = qty(it.quantity);
       const vUn = money(it.unitPrice);
-      const vProd = money(it.total);
+      const vProdNum = Math.round(Number(it.total) * 100) / 100;
+      const vProd = money(vProdNum);
+      // NT 2025.002 / rejeição 1115 — grupo IBSCBS obrigatório (CRT 3 desde 2026)
+      const ibs = buildIbsCbsItemXml(vProdNum);
+      ibsSums.vBC += ibs.vBC;
+      ibsSums.vIBSUF += ibs.vIBSUF;
+      ibsSums.vIBSMun += ibs.vIBSMun;
+      ibsSums.vIBS += ibs.vIBS;
+      ibsSums.vCBS += ibs.vCBS;
       return (
         `<det nItem="${it.itemNumber}">` +
         `<prod>` +
@@ -108,13 +201,21 @@ export function buildNfceXml(input: NfceBuildInput): string {
         `</ICMS>` +
         `<PIS><PISNT><CST>07</CST></PISNT></PIS>` +
         `<COFINS><COFINSNT><CST>07</CST></COFINSNT></COFINS>` +
+        ibs.xml +
         `</imposto>` +
-        // NT 2025.002 — valor do item (participação no total)
+        // NT 2025.002 — em 2026 vItem não soma IBS/CBS
         `<vItem>${vProd}</vItem>` +
         `</det>`
       );
     })
     .join('');
+
+  // Arredonda totais IBS/CBS após soma dos itens
+  ibsSums.vBC = Math.round(ibsSums.vBC * 100) / 100;
+  ibsSums.vIBSUF = Math.round(ibsSums.vIBSUF * 100) / 100;
+  ibsSums.vIBSMun = Math.round(ibsSums.vIBSMun * 100) / 100;
+  ibsSums.vIBS = Math.round(ibsSums.vIBS * 100) / 100;
+  ibsSums.vCBS = Math.round(ibsSums.vCBS * 100) / 100;
 
   const tPag = mapPaymentCode(input.paymentMethod);
   // tPag=99 exige xPag no schema
@@ -189,7 +290,8 @@ export function buildNfceXml(input: NfceBuildInput): string {
     `<vPIS>0.00</vPIS><vCOFINS>0.00</vCOFINS><vOutro>0.00</vOutro>` +
     `<vNF>${vNF}</vNF>` +
     `</ICMSTot>` +
-    // NT 2025.002 — total com IBS/CBS/IS (em 2026, igual a vNF quando IBS/CBS=0)
+    buildIbsCbsTotXml(ibsSums) +
+    // Em 2026 vNFTot acompanha a soma dos vItem (sem IBS/CBS por fora)
     `<vNFTot>${vNF}</vNFTot>` +
     `</total>`;
 
