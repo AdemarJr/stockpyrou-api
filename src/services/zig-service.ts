@@ -125,24 +125,9 @@ type ZigKvConfig = {
   zigToken?: string;
 };
 
-function parseZigKvConfig(raw: unknown): ZigKvConfig | null {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
-  return raw as ZigKvConfig;
-}
-
-function parseProductMappings(raw: unknown): Record<string, string> {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
-  return raw as Record<string, string>;
-}
-
-function parseAutoBaixaConfig(raw: unknown): { enabled?: boolean } {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
-  return raw as { enabled?: boolean };
-}
-
 /** Token ZIG: 1) KV por empresa (`zigToken`), 2) variável de ambiente `ZIG_API_KEY` (dev/legado). */
 export async function getZigTokenForCompany(companyId: string): Promise<string> {
-  const cfg = parseZigKvConfig(await kvGet(`zig_config:${companyId}`));
+  const cfg = (await kvGet(`zig_config:${companyId}`)) as ZigKvConfig | null;
   const fromKv = cfg?.zigToken?.trim();
   if (fromKv) return fromKv;
   const env = process.env.ZIG_API_KEY?.trim();
@@ -205,7 +190,7 @@ interface ZigSale {
 function zigEffectiveCount(sale: Pick<ZigSale, "count" | "fractionalAmount">): number {
   const c = Number(sale.count) || 0;
   const raw = sale.fractionalAmount;
-  const f = raw != null && String(raw) !== '' ? Number(raw) : NaN;
+  const f = raw != null && raw !== "" ? Number(raw) : NaN;
   if (Number.isFinite(f) && f > 0) {
     return c + f;
   }
@@ -834,7 +819,7 @@ export async function buildZigSaidaComparisonReport(
   }
 
   const token = await getZigTokenForCompany(companyId);
-  const config = parseZigKvConfig(await kvGet(`zig_config:${companyId}`));
+  const config = (await kvGet(`zig_config:${companyId}`)) as ZigKvConfig | null;
   if (!config?.storeId) {
     throw new Error(
       "Integração ZIG não configurada. Informe token e loja em Integrações → ZIG.",
@@ -993,7 +978,7 @@ export const saveConfig = async (
   redeId?: string,
   zigToken?: string,
 ) => {
-  const prev = parseZigKvConfig(await kvGet(`zig_config:${companyId}`)) || {};
+  const prev = ((await kvGet(`zig_config:${companyId}`)) as ZigKvConfig | null) || {};
   const next: ZigKvConfig = { ...prev, storeId, redeId };
   const t = zigToken?.trim();
   if (t) next.zigToken = t;
@@ -1001,7 +986,7 @@ export const saveConfig = async (
 };
 
 export const getConfig = async (companyId: string) => {
-  const raw = parseZigKvConfig(await kvGet(`zig_config:${companyId}`));
+  const raw = (await kvGet(`zig_config:${companyId}`)) as ZigKvConfig | null;
   if (!raw) return null;
   const tok = raw.zigToken?.trim();
   return {
@@ -1034,7 +1019,7 @@ export const fetchPendingSales = async (
 ) => {
   const token = await getZigTokenForCompany(companyId);
 
-  const config = parseZigKvConfig(await kvGet(`zig_config:${companyId}`));
+  const config = await kvGet(`zig_config:${companyId}`);
   if (!config || !config.storeId) {
     throw new Error("Integração ZIG não configurada. Selecione uma loja nas configurações.");
   }
@@ -1122,7 +1107,7 @@ export const fetchPendingSales = async (
     const recipesData = await loadRecipesWithIngredients(companyId);
 
     // Carregar mapeamentos salvos
-    const productMappings = parseProductMappings(await kvGet(`zig_product_mappings:${companyId}`));
+    const productMappings = await kvGet(`zig_product_mappings:${companyId}`) || {};
 
     // Função para encontrar produto com match inteligente
     const findProduct = (sale: ZigSale) => {
@@ -1149,10 +1134,10 @@ export const fetchPendingSales = async (
           .replace(/[\u0300-\u036f]/g, '')
           .replace(/[^a-z0-9]/g, '');
       
-      const zigNameNorm = normalizeName(sale.productName ?? '');
+      const zigNameNorm = normalizeName(sale.productName);
       
       product = products.find(p => {
-        const productNameNorm = normalizeName(String(p.name ?? ''));
+        const productNameNorm = normalizeName(p.name);
         return productNameNorm === zigNameNorm || 
                productNameNorm.includes(zigNameNorm) ||
                zigNameNorm.includes(productNameNorm);
@@ -1329,6 +1314,19 @@ type DeductionGroup = {
   transactionIds: string[];
 };
 
+/** Normaliza data do snapshot/preview para YYYY-MM-DD (evita 1 grupo por horário). */
+function normalizeZigSaleYmd(saleDate: string | undefined | null): string {
+  const raw = String(saleDate || "").trim();
+  if (!raw) return "";
+  const m = /^(\d{4}-\d{2}-\d{2})/.exec(raw);
+  if (m) return m[1];
+  const d = new Date(raw);
+  if (!Number.isNaN(d.getTime())) {
+    return transactionYmdSaoPaulo(d.toISOString()) || raw.split("T")[0] || "";
+  }
+  return raw.split("T")[0] || raw;
+}
+
 function addToDeductionGroup(
   groups: Map<string, DeductionGroup>,
   saleDate: string,
@@ -1338,13 +1336,15 @@ function addToDeductionGroup(
   transactionId: string,
 ) {
   if (!productSku) return;
-  const ymd = (saleDate || "").trim();
-  const groupKey = `${ymd}|${productSku}`;
+  const ymd = normalizeZigSaleYmd(saleDate);
+  const sku = productSku.trim();
+  if (!sku) return;
+  const groupKey = `${ymd}|${sku}`;
   const prev = groups.get(groupKey);
   if (!prev) {
     groups.set(groupKey, {
       saleDate: ymd,
-      productSku,
+      productSku: sku,
       productName,
       totalQty: qty || 0,
       transactionIds: [transactionId],
@@ -1406,10 +1406,10 @@ function buildDeductionGroupsFromLineItems(
     if (!selectedSet.has(line.transactionId)) continue;
     addToDeductionGroup(
       groups,
-      String(line.saleDate || ""),
+      line.saleDate || "",
       line.productSku.trim(),
       line.productName || line.productSku,
-      line.quantity,
+      Number(line.quantity) || 0,
       line.transactionId,
     );
   }
@@ -1452,7 +1452,7 @@ async function executeZigStockDeductionFromGroups(
     };
   }
 
-  const productMappings = parseProductMappings(await kvGet(`zig_product_mappings:${companyId}`));
+  const productMappings = (await kvGet(`zig_product_mappings:${companyId}`)) || {};
 
   const normalizeName = (name: string) =>
     name
@@ -1501,14 +1501,22 @@ async function executeZigStockDeductionFromGroups(
     return created;
   };
 
-  for (const group of groups.values()) {
-    const ref = group.transactionIds.slice(0, 5).join(", ");
-    const reason = `Venda ZIG (Lote) - Ref: ${ref}${group.transactionIds.length > 5 ? "..." : ""}`;
-    const stableIds = Array.from(new Set(group.transactionIds)).sort().join("|");
-    const ymd = (group.saleDate || "").trim();
-    const sourceBase = `zig:${companyId}:${ymd || "sem-data"}:${group.productSku}:${fnv1a32(stableIds)}`;
-    const movementDateIso = ymd ? `${ymd}T12:00:00.000-03:00` : new Date().toISOString();
+  /**
+   * Consolida por produto do sistema + dia (não por cupom/linha ZIG).
+   * Ex.: 200 Coronas em N cupons → 1 baixa de quantidade 200.
+   */
+  type ResolvedLot = {
+    ymd: string;
+    product: any;
+    totalQty: number;
+    productSku: string;
+    productName: string;
+    transactionIds: string[];
+  };
+  const lotsByProductDay = new Map<string, ResolvedLot>();
 
+  for (const group of groups.values()) {
+    const ymd = normalizeZigSaleYmd(group.saleDate);
     let product: any;
     if (opts.registeredOnly) {
       product = findProduct(group.productSku, group.productName);
@@ -1522,17 +1530,63 @@ async function executeZigStockDeductionFromGroups(
       product = await ensureProduct(group.productSku, group.productName);
     }
 
+    const lotKey = `${ymd || "sem-data"}|${product.id}`;
+    const prev = lotsByProductDay.get(lotKey);
+    if (!prev) {
+      lotsByProductDay.set(lotKey, {
+        ymd,
+        product,
+        totalQty: group.totalQty || 0,
+        productSku: group.productSku,
+        productName: group.productName || product.name || group.productSku,
+        transactionIds: [...group.transactionIds],
+      });
+    } else {
+      prev.totalQty += group.totalQty || 0;
+      prev.transactionIds.push(...group.transactionIds);
+      if (!prev.productName && group.productName) prev.productName = group.productName;
+    }
+  }
+
+  for (const lot of lotsByProductDay.values()) {
+    if (!Number.isFinite(lot.totalQty) || lot.totalQty <= 0) continue;
+
+    const uniqueIds = Array.from(new Set(lot.transactionIds));
+    const ref = uniqueIds.slice(0, 5).join(", ");
+    const qtyLabel = Number(lot.totalQty).toLocaleString("pt-BR", {
+      maximumFractionDigits: 4,
+    });
+    const reason =
+      `Baixa ZIG (lote) — ${lot.productName} — qtd ${qtyLabel}` +
+      (uniqueIds.length > 1 ? ` — ${uniqueIds.length} cupons/linhas` : "") +
+      ` — Ref: ${ref}${uniqueIds.length > 5 ? "..." : ""}`;
+
+    // Source estável por produto+dia (não por conjunto de cupons):
+    // confirmações parciais no mesmo dia somam no mesmo lote lógico via qty,
+    // mas cada confirm gera movement próprio se o hash de ids mudar — por isso
+    // usamos hash só do produto+dia para idempotência do lote completo.
+    // Para permitir reprocessar só o que faltou, incluímos hash dos ids deste confirm.
+    const stableIds = uniqueIds.sort().join("|");
+    const sourceBase = `zig:${companyId}:${lot.ymd || "sem-data"}:${lot.product.id}:${fnv1a32(stableIds)}`;
+    const movementDateIso = lot.ymd
+      ? `${lot.ymd}T12:00:00.000-03:00`
+      : new Date().toISOString();
+
+    console.log(
+      `ZIG: baixa lote produto=${lot.product.id} (${lot.productName}) dia=${lot.ymd} qty=${lot.totalQty} linhas=${uniqueIds.length}`,
+    );
+
     await processStockDeduction(
       companyId,
-      product,
-      group.totalQty,
+      lot.product,
+      lot.totalQty,
       recipesData,
       reason,
       sourceBase,
       movementDateIso,
     );
 
-    for (const id of Array.from(new Set(group.transactionIds))) {
+    for (const id of uniqueIds) {
       await kvSet(`${processedKeyPrefix}${id}`, true);
     }
 
@@ -1552,7 +1606,7 @@ async function executeZigStockDeductionFromGroups(
     processed: processedGroups,
     createdProducts,
     message:
-      `${processedGroups} produtos baixados em lote com sucesso${createdProducts > 0 ? ` (produtos criados: ${createdProducts})` : ""}.`,
+      `${processedGroups} produto(s) baixado(s) em lote (1 saída por produto/dia)${createdProducts > 0 ? ` — produtos criados: ${createdProducts}` : ""}.`,
   };
 }
 
@@ -1661,7 +1715,7 @@ export async function confirmStockFromZigPreviewSnapshot(
   previewSessionId: string | undefined,
   registeredOnly: boolean,
 ): Promise<{ processed: number; createdProducts: number; message: string }> {
-  const config = parseZigKvConfig(await kvGet(`zig_config:${companyId}`));
+  const config = await kvGet(`zig_config:${companyId}`);
   if (!config?.storeId) {
     throw new Error("Integração ZIG não configurada.");
   }
@@ -1693,23 +1747,48 @@ export async function confirmStockFromZigPreviewSnapshot(
     );
   }
 
-  const selectedSet = new Set(transactionIds);
-  const groups = buildDeductionGroupsFromLineItems(snapshotLines, selectedSet);
+  const selectedIds = Array.from(
+    new Set((transactionIds || []).map((id) => String(id || "").trim()).filter(Boolean)),
+  );
+  if (selectedIds.length === 0) {
+    throw new Error(
+      "Nenhum produto selecionado. Marque os itens na lista «Vendas ZIG — baixa no estoque» antes de confirmar.",
+    );
+  }
+
+  const selectedSet = new Set(selectedIds);
+  // Snapshot do KV pode ter o dia inteiro — só processa o que foi marcado na UI.
+  const onlySelectedLines = snapshotLines.filter((l) => selectedSet.has(l.transactionId));
+  if (onlySelectedLines.length === 0) {
+    throw new Error(
+      "Os IDs selecionados não correspondem ao preview. Busque as vendas novamente e marque os produtos desejados.",
+    );
+  }
+
+  const groups = buildDeductionGroupsFromLineItems(onlySelectedLines, selectedSet);
 
   console.log(
-    `ZIG: confirm snapshot — baixa no Stockpyrou apenas (${transactionIds.length} id(s)), sem API ZIG`,
+    `ZIG: confirm snapshot — apenas selecionados (${selectedIds.length} id(s), ${onlySelectedLines.length} linha(s) do preview), sem API ZIG`,
   );
+
+  if (groups.size === 0) {
+    throw new Error(
+      "Nenhum produto selecionado válido para baixa. Marque os itens na lista e tente novamente.",
+    );
+  }
 
   const stockRes = await executeZigStockDeductionFromGroups(companyId, groups, {
     registeredOnly,
-    previewSessionIdToClear: sid,
+    // Não apaga a sessão se ainda houver itens não selecionados no preview
+    // (permite confirmar outro lote sem buscar de novo).
+    previewSessionIdToClear:
+      onlySelectedLines.length >= snapshotLines.length ? sid : undefined,
   });
 
-  // Receita (sales) baseada no snapshot (sem chamar API ZIG)
+  // Receita só das linhas selecionadas
   try {
-    await recordRevenueSaleFromZigSnapshot(companyId, selectedSet, snapshotLines);
+    await recordRevenueSaleFromZigSnapshot(companyId, selectedSet, onlySelectedLines);
   } catch (e: unknown) {
-    // Não bloqueia a baixa por falha de receita; mas loga para diagnóstico.
     console.error("ZIG: Falha ao registrar receita (sales) no confirm snapshot:", e);
   }
 
@@ -1749,7 +1828,7 @@ export const confirmSales = async (
   endDate?: string,
   options?: ConfirmSalesOptions,
 ) => {
-  const config = parseZigKvConfig(await kvGet(`zig_config:${companyId}`));
+  const config = await kvGet(`zig_config:${companyId}`);
   if (!config || !config.storeId) {
     throw new Error("Integração ZIG não configurada.");
   }
@@ -1821,12 +1900,26 @@ export const confirmSales = async (
   );
 
   try {
-    const selectedSet = new Set(transactionIds);
+    const selectedIds = Array.from(
+      new Set((transactionIds || []).map((id) => String(id || "").trim()).filter(Boolean)),
+    );
+    if (selectedIds.length === 0) {
+      throw new Error(
+        "Nenhum produto selecionado. Marque os itens na lista «Vendas ZIG — baixa no estoque» antes de confirmar.",
+      );
+    }
+    const selectedSet = new Set(selectedIds);
 
     let groups: Map<string, DeductionGroup>;
 
     if (usePreviewSnapshot) {
-      groups = buildDeductionGroupsFromLineItems(snapshotLines!, selectedSet);
+      const onlySelected = snapshotLines!.filter((l) => selectedSet.has(l.transactionId));
+      if (onlySelected.length === 0) {
+        throw new Error(
+          "Os IDs selecionados não correspondem ao preview. Busque as vendas e marque os produtos desejados.",
+        );
+      }
+      groups = buildDeductionGroupsFromLineItems(onlySelected, selectedSet);
     } else {
       const token = await getZigTokenForCompany(companyId);
       const sales: ZigSale[] = await fetchZigSaidaProdutosRange(
@@ -1841,9 +1934,18 @@ export const confirmSales = async (
       groups = buildDeductionGroupsFromZigSales(sales, selectedSet);
     }
 
+    if (groups.size === 0) {
+      throw new Error("Nenhum produto selecionado válido para baixa.");
+    }
+
     return await executeZigStockDeductionFromGroups(companyId, groups, {
       registeredOnly: !!options?.registeredOnly,
-      previewSessionIdToClear: sid,
+      previewSessionIdToClear:
+        usePreviewSnapshot && snapshotLines && selectedIds.length >= snapshotLines.length
+          ? sid
+          : usePreviewSnapshot
+            ? undefined
+            : sid,
     });
   } catch (error: any) {
     console.error("ZIG: Erro ao confirmar vendas:", error);
@@ -1854,8 +1956,8 @@ export const confirmSales = async (
 // --- Baixa automática (dia seguinte = vendas de "ontem" em SP) — cria produto se faltar cadastro ---
 
 export async function getAutoBaixaConfig(companyId: string): Promise<{ enabled: boolean }> {
-  const row = parseAutoBaixaConfig(await kvGet(`zig_auto_baixa:${companyId}`));
-  return { enabled: !!row.enabled };
+  const row = await kvGet(`zig_auto_baixa:${companyId}`);
+  return { enabled: !!(row && row.enabled) };
 }
 
 export async function saveAutoBaixaConfig(companyId: string, enabled: boolean): Promise<void> {
@@ -1876,7 +1978,7 @@ export async function runAutoBaixaZigOntem(companyId: string) {
     };
   }
 
-  const config = parseZigKvConfig(await kvGet(`zig_config:${companyId}`));
+  const config = await kvGet(`zig_config:${companyId}`);
   if (!config?.storeId) {
     return {
       skipped: true,
@@ -1968,7 +2070,7 @@ async function processStockDeduction(
       await deductStock(
         b.productId,
         neededQty,
-        `Venda ZIG (Combo: ${product.name}) - Ref: ${refId}`,
+        `Baixa ZIG (Combo: ${product.name}) — ${refId}`,
         `${sourceBase}:${b.productId}:combo`,
         companyId,
         movementDateIso,
@@ -1986,17 +2088,18 @@ async function processStockDeduction(
       await deductStock(
         pid,
         neededQty,
-        `Venda ZIG (Receita: ${product.name}) - Ref: ${refId}`,
+        `Baixa ZIG (Receita: ${product.name}) — ${refId}`,
         `${sourceBase}:${pid}:recipe`,
         companyId,
         movementDateIso,
       );
     }
   } else {
+    // Motivo já vem consolidado do lote (produto + qtd total)
     await deductStock(
       product.id,
       qty,
-      `Venda ZIG - Ref: ${refId}`,
+      refId,
       `${sourceBase}:${product.id}:direct`,
       companyId,
       movementDateIso,
@@ -2031,6 +2134,8 @@ async function deductStock(
   companyId: string,
   movementDateIso: string,
 ) {
+  // Tipo `saida` (como baixa manual): aparece em Relatórios → Saídas como "Saída",
+  // com quantidade total do lote — não uma linha por cupom ZIG.
   await query(
     `SELECT * FROM deduct_stock_once($1,$2,$3,$4,$5,$6,$7)`,
     [
@@ -2039,7 +2144,7 @@ async function deductStock(
       qty,
       source,
       `${reason} - Integração automática ZIG`,
-      'venda',
+      'saida',
       movementDateIso || new Date().toISOString(),
     ],
   );

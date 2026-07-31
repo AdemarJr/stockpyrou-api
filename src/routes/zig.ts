@@ -116,8 +116,14 @@ async function handleZigConfirm(c: Context<{ Variables: AppVariables }>) {
   try {
     const body = (await c.req.json()) as Record<string, unknown>;
     const { companyId, transactionIds, registeredOnly, lineItems, previewSessionId } = body;
-    if (!companyId || !transactionIds) {
-      return c.json({ error: 'Missing companyId or transactionIds' }, 400);
+    if (!companyId || !Array.isArray(transactionIds) || transactionIds.length === 0) {
+      return c.json(
+        {
+          error:
+            'Selecione pelo menos um produto na lista «Vendas ZIG — baixa no estoque» (transactionIds vazio).',
+        },
+        400,
+      );
     }
 
     const sid =
