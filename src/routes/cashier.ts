@@ -90,6 +90,10 @@ cashier.get('/current', requireAuth, async (c) => {
     `SELECT * FROM sales WHERE register_id = $1 ORDER BY timestamp ASC`,
     [register.id],
   );
+  const { rows: movements } = await query(
+    `SELECT * FROM cash_movements WHERE register_id = $1 ORDER BY timestamp ASC`,
+    [register.id],
+  );
 
   const sales = salesData.map((sale) => ({
     id: sale.id,
@@ -102,11 +106,28 @@ cashier.get('/current', requireAuth, async (c) => {
     cashierName: sale.cashier_name,
   }));
 
+  const mapMov = (m: Record<string, unknown>) => ({
+    id: m.id,
+    amount: parseFloat(String(m.amount)) || 0,
+    reason: m.reason != null ? String(m.reason) : '',
+    timestamp: m.timestamp,
+    performedBy: m.performed_by_name != null ? String(m.performed_by_name) : '',
+  });
+
+  const withdrawals = movements
+    .filter((m) => String(m.type) === 'withdrawal')
+    .map((m) => mapMov(m as Record<string, unknown>));
+  const deposits = movements
+    .filter((m) => String(m.type) === 'deposit')
+    .map((m) => mapMov(m as Record<string, unknown>));
+
   return c.json({
     register: {
       ...mapRegister(register),
       salesCount: sales.length,
       sales,
+      withdrawals,
+      deposits,
     },
   });
 });
@@ -142,10 +163,14 @@ cashier.post('/sale', requireAuth, async (c) => {
         : '';
   const customerId = customerIdRaw || null;
 
+  const earlySplit = Array.isArray(detailsObj.payments)
+    ? (detailsObj.payments as Array<{ method?: string }>)
+    : [];
   // Fiado/boleto e NFC-e exigem cliente com documento
   const needsCustomer =
     paymentMethod === 'fiado' ||
     paymentMethod === 'boleto' ||
+    earlySplit.some((p) => p.method === 'fiado' || p.method === 'boleto') ||
     emitNfce;
   if (needsCustomer) {
     const customerName = String(detailsObj.customerName || detailsObj.customer_name || '').trim();
@@ -229,8 +254,23 @@ cashier.post('/sale', requireAuth, async (c) => {
     }
   }
 
+  const splitPayments = Array.isArray(detailsObj.payments)
+    ? (detailsObj.payments as Array<{ method?: string; amount?: number }>)
+    : null;
+
   let newBalance = parseFloat(String(register.current_balance));
-  if (paymentMethod === 'money' || paymentMethod === 'pix') {
+  if (splitPayments && splitPayments.length > 0) {
+    const drawerIn = splitPayments
+      .filter((p) => p.method === 'money' || p.method === 'pix')
+      .reduce((s, p) => s + (parseFloat(String(p.amount)) || 0), 0);
+    if (drawerIn > 0) {
+      newBalance += drawerIn;
+      await query('UPDATE cash_registers SET current_balance = $1 WHERE id = $2', [
+        newBalance,
+        registerId,
+      ]);
+    }
+  } else if (paymentMethod === 'money' || paymentMethod === 'pix') {
     newBalance += parseFloat(String(total));
     await query('UPDATE cash_registers SET current_balance = $1 WHERE id = $2', [
       newBalance,
@@ -238,19 +278,31 @@ cashier.post('/sale', requireAuth, async (c) => {
     ]);
   }
 
-  // Fiado / boleto → Contas a Receber
-  if (paymentMethod === 'fiado' || paymentMethod === 'boleto') {
-    const details =
-      paymentDetails && typeof paymentDetails === 'object'
-        ? (paymentDetails as { dueDate?: string; customerName?: string })
-        : null;
+  // Fiado / boleto → Contas a Receber (único ou parcelas do misto)
+  const receivableParts =
+    splitPayments && splitPayments.length > 0
+      ? splitPayments.filter((p) => p.method === 'fiado' || p.method === 'boleto')
+      : paymentMethod === 'fiado' || paymentMethod === 'boleto'
+        ? [{ method: String(paymentMethod), amount: parseFloat(String(total)) }]
+        : [];
+
+  for (const part of receivableParts) {
+    const amount = parseFloat(String(part.amount)) || 0;
+    if (amount <= 0) continue;
     try {
       await createReceivableFromSale({
         companyId,
         saleId: String(newSale.id),
-        amount: parseFloat(String(total)),
-        paymentMethod: String(paymentMethod),
-        paymentDetails: details,
+        amount,
+        paymentMethod: String(part.method || 'fiado'),
+        paymentDetails: {
+          dueDate:
+            typeof detailsObj.dueDate === 'string' ? detailsObj.dueDate : undefined,
+          customerName:
+            typeof detailsObj.customerName === 'string'
+              ? detailsObj.customerName
+              : undefined,
+        },
         userId: auth.userId,
       });
     } catch (err) {
@@ -304,6 +356,14 @@ cashier.post('/withdrawal', requireAuth, async (c) => {
   if ('error' in ctx) return ctx.error;
   const { auth, companyId } = ctx;
   const { registerId, amount, reason } = await c.req.json();
+  const reasonText = String(reason || '').trim();
+  const value = parseFloat(String(amount));
+  if (!Number.isFinite(value) || value <= 0) {
+    return c.json({ error: 'Informe um valor válido para a sangria' }, 400);
+  }
+  if (reasonText.length < 3) {
+    return c.json({ error: 'Informe o motivo da sangria (mín. 3 caracteres)' }, 400);
+  }
 
   const { rows: regRows } = await query(
     'SELECT * FROM cash_registers WHERE id = $1 AND company_id = $2 LIMIT 1',
@@ -317,10 +377,10 @@ cashier.post('/withdrawal', requireAuth, async (c) => {
   const { rows: movRows } = await query(
     `INSERT INTO cash_movements (company_id, register_id, type, amount, reason, performed_by_id, performed_by_name)
      VALUES ($1,$2,'withdrawal',$3,$4,$5,$6) RETURNING *`,
-    [companyId, registerId, parseFloat(String(amount)), reason, auth.userId, auth.fullName],
+    [companyId, registerId, value, reasonText, auth.userId, auth.fullName],
   );
 
-  const newBalance = parseFloat(String(register.current_balance)) - parseFloat(String(amount));
+  const newBalance = parseFloat(String(register.current_balance)) - value;
   await query('UPDATE cash_registers SET current_balance = $1 WHERE id = $2', [newBalance, registerId]);
 
   const mov = movRows[0] as Record<string, unknown>;
@@ -342,6 +402,14 @@ cashier.post('/deposit', requireAuth, async (c) => {
   if ('error' in ctx) return ctx.error;
   const { auth, companyId } = ctx;
   const { registerId, amount, reason } = await c.req.json();
+  const reasonText = String(reason || '').trim();
+  const value = parseFloat(String(amount));
+  if (!Number.isFinite(value) || value <= 0) {
+    return c.json({ error: 'Informe um valor válido para o suprimento' }, 400);
+  }
+  if (reasonText.length < 3) {
+    return c.json({ error: 'Informe o motivo do suprimento (ex.: troco)' }, 400);
+  }
 
   const { rows: regRows } = await query(
     'SELECT * FROM cash_registers WHERE id = $1 AND company_id = $2 LIMIT 1',
@@ -355,10 +423,10 @@ cashier.post('/deposit', requireAuth, async (c) => {
   const { rows: movRows } = await query(
     `INSERT INTO cash_movements (company_id, register_id, type, amount, reason, performed_by_id, performed_by_name)
      VALUES ($1,$2,'deposit',$3,$4,$5,$6) RETURNING *`,
-    [companyId, registerId, parseFloat(String(amount)), reason, auth.userId, auth.fullName],
+    [companyId, registerId, value, reasonText, auth.userId, auth.fullName],
   );
 
-  const newBalance = parseFloat(String(register.current_balance)) + parseFloat(String(amount));
+  const newBalance = parseFloat(String(register.current_balance)) + value;
   await query('UPDATE cash_registers SET current_balance = $1 WHERE id = $2', [newBalance, registerId]);
 
   const mov = movRows[0] as Record<string, unknown>;
@@ -395,6 +463,10 @@ cashier.post('/close', requireAuth, async (c) => {
   ]);
 
   const totalSales = sales.reduce((s, r) => s + (parseFloat(String(r.total)) || 0), 0);
+  // Dinheiro em gaveta: só vendas em dinheiro entram no esperado do caixa físico
+  const cashSales = sales
+    .filter((r) => String(r.payment_method || 'money') === 'money')
+    .reduce((s, r) => s + (parseFloat(String(r.total)) || 0), 0);
   const totalWithdrawals = movements
     .filter((m) => m.type === 'withdrawal')
     .reduce((s, m) => s + (parseFloat(String(m.amount)) || 0), 0);
@@ -402,7 +474,7 @@ cashier.post('/close', requireAuth, async (c) => {
     .filter((m) => m.type === 'deposit')
     .reduce((s, m) => s + (parseFloat(String(m.amount)) || 0), 0);
   const expectedBalance =
-    parseFloat(String(register.initial_balance)) + totalSales + totalDeposits - totalWithdrawals;
+    parseFloat(String(register.initial_balance)) + cashSales + totalDeposits - totalWithdrawals;
   const difference = parseFloat(String(finalBalance)) - expectedBalance;
 
   const { rows: closed } = await query(

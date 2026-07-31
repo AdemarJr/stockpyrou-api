@@ -15,6 +15,11 @@ export interface ProductDto {
   barcode?: string;
   sellingPrice?: number;
   image?: string;
+  ncm?: string;
+  cfop?: string;
+  csosn?: string;
+  cst?: string;
+  origem?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -63,6 +68,11 @@ export function mapProductRow(data: Record<string, unknown>): ProductDto {
     barcode: data.barcode != null ? String(data.barcode) : undefined,
     sellingPrice: Number(data.sale_price) || 0,
     image: data.image_url != null ? String(data.image_url) : undefined,
+    ncm: data.ncm != null ? String(data.ncm) : undefined,
+    cfop: data.cfop != null ? String(data.cfop) : undefined,
+    csosn: data.csosn != null ? String(data.csosn) : undefined,
+    cst: data.cst != null ? String(data.cst) : undefined,
+    origem: data.origem != null ? String(data.origem) : undefined,
     createdAt: String(data.created_at),
     updatedAt: String(data.updated_at ?? data.created_at),
   };
@@ -86,6 +96,14 @@ export function mapProductToDb(
   if (product.supplierId !== undefined) row.supplier_id = product.supplierId || null;
   if (product.barcode !== undefined) row.barcode = product.barcode || null;
   if (product.image !== undefined) row.image_url = product.image || null;
+  if (product.ncm !== undefined) row.ncm = String(product.ncm || '').replace(/\D/g, '').slice(0, 8) || null;
+  if (product.cfop !== undefined) row.cfop = String(product.cfop || '').replace(/\D/g, '').slice(0, 4) || null;
+  if (product.csosn !== undefined) row.csosn = String(product.csosn || '').replace(/\D/g, '').slice(0, 4) || null;
+  if (product.cst !== undefined) row.cst = String(product.cst || '').replace(/\D/g, '').slice(0, 3) || null;
+  if (product.origem !== undefined) {
+    const o = String(product.origem ?? '').replace(/\D/g, '').slice(0, 1);
+    row.origem = o || null;
+  }
   if (product.shelfLife != null || product.bundleItems != null) {
     row.description = Object.keys(desc).length > 0 ? JSON.stringify(desc) : null;
   }

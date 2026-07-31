@@ -2,7 +2,6 @@ import { Hono } from 'hono';
 import { query } from '../db/pool.js';
 import type { AppVariables } from '../middleware/auth.js';
 import { requireAuth, requireCompany } from '../middleware/auth.js';
-import { buildZigSaidaComparisonReport } from '../services/zig-service.js';
 
 const reports = new Hono<{ Variables: AppVariables }>();
 reports.use('*', requireAuth, requireCompany);
@@ -27,19 +26,36 @@ reports.get('/sales', async (c) => {
   sql += ` ORDER BY timestamp DESC LIMIT $${params.length}`;
 
   const { rows } = await query(sql, params);
-  const sales = rows.map((sale) => ({
-    id: sale.id,
-    registerId: sale.register_id,
-    items: sale.items,
-    total: parseFloat(String(sale.total)),
-    discount: 0,
-    paymentMethod: sale.payment_method,
-    customerName: null,
-    customerPhone: null,
-    saleDate: sale.timestamp,
-    cashierName: sale.cashier_name,
-    companyId: sale.company_id,
-  }));
+  const sales = rows.map((sale) => {
+    const details =
+      sale.payment_details && typeof sale.payment_details === 'object'
+        ? (sale.payment_details as Record<string, unknown>)
+        : typeof sale.payment_details === 'string'
+          ? (() => {
+              try {
+                return JSON.parse(String(sale.payment_details)) as Record<string, unknown>;
+              } catch {
+                return {};
+              }
+            })()
+          : {};
+    const discount =
+      parseFloat(String(details.cartDiscount ?? details.discount ?? 0)) || 0;
+    return {
+      id: sale.id,
+      registerId: sale.register_id,
+      items: sale.items,
+      total: parseFloat(String(sale.total)),
+      discount,
+      paymentMethod: sale.payment_method,
+      customerName:
+        typeof details.customerName === 'string' ? details.customerName : null,
+      customerPhone: null,
+      saleDate: sale.timestamp,
+      cashierName: sale.cashier_name,
+      companyId: sale.company_id,
+    };
+  });
   return c.json({ sales });
 });
 
@@ -75,27 +91,6 @@ reports.get('/closures', async (c) => {
       notes: r.closing_notes,
     })),
   });
-});
-
-reports.get('/zig-saida-comparison', async (c) => {
-  try {
-    const companyId = c.get('companyId');
-    const startDate = c.req.query('startDate');
-    const endDate = c.req.query('endDate');
-    if (!startDate || !endDate) {
-      return c.json(
-        { error: 'Informe startDate e endDate (YYYY-MM-DD) no período do relatório.' },
-        400,
-      );
-    }
-
-    const result = await buildZigSaidaComparisonReport(companyId, startDate, endDate);
-    return c.json(result);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Erro ao montar comparativo ZIG';
-    console.error('zig-saida-comparison:', error);
-    return c.json({ error: message }, 500);
-  }
 });
 
 export default reports;

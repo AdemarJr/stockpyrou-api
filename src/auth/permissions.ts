@@ -8,7 +8,10 @@ export interface UserPermissions {
   canManageRecipes: boolean;
   canViewReports: boolean;
   canManageUsers: boolean;
+  /** Configurações da empresa / integrações / fiscal — só admin e superadmin. */
   canManageSettings: boolean;
+  /** PDV: abrir/fechar caixa, vender, sangria e suprimento. */
+  canAccessCashier: boolean;
 }
 
 export interface UserProfile {
@@ -38,6 +41,8 @@ export function mapAppUserRole(dbRole: string): UserRole {
     case 'viewer':
       return 'visualizacao';
     case 'operador':
+    case 'operador_pdv':
+    case 'caixa':
     case 'user':
     case 'operator':
       return 'operador';
@@ -46,6 +51,13 @@ export function mapAppUserRole(dbRole: string): UserRole {
   }
 }
 
+/**
+ * Matriz de perfis:
+ * - superadmin / admin: tudo (inclui configurações e usuários)
+ * - gerente: operação + relatórios; sem usuários e sem configurações
+ * - operador: somente PDV (abrir/fechar caixa, vendas, sangria, troco)
+ * - visualizacao: dashboard e relatórios (somente leitura)
+ */
 export function getPermissionsByRole(role: UserRole): UserPermissions {
   switch (role) {
     case 'superadmin':
@@ -59,6 +71,7 @@ export function getPermissionsByRole(role: UserRole): UserPermissions {
         canViewReports: true,
         canManageUsers: true,
         canManageSettings: true,
+        canAccessCashier: true,
       };
     case 'gerente':
       return {
@@ -70,17 +83,43 @@ export function getPermissionsByRole(role: UserRole): UserPermissions {
         canViewReports: true,
         canManageUsers: false,
         canManageSettings: false,
+        canAccessCashier: true,
       };
-    default:
+    case 'operador':
       return {
-        canViewDashboard: true,
-        canManageProducts: true,
+        canViewDashboard: false,
+        canManageProducts: false,
         canDeleteProducts: false,
         canManageStock: false,
         canManageRecipes: false,
         canViewReports: false,
         canManageUsers: false,
         canManageSettings: false,
+        canAccessCashier: true,
+      };
+    case 'visualizacao':
+      return {
+        canViewDashboard: true,
+        canManageProducts: false,
+        canDeleteProducts: false,
+        canManageStock: false,
+        canManageRecipes: false,
+        canViewReports: true,
+        canManageUsers: false,
+        canManageSettings: false,
+        canAccessCashier: false,
+      };
+    default:
+      return {
+        canViewDashboard: false,
+        canManageProducts: false,
+        canDeleteProducts: false,
+        canManageStock: false,
+        canManageRecipes: false,
+        canViewReports: false,
+        canManageUsers: false,
+        canManageSettings: false,
+        canAccessCashier: true,
       };
   }
 }
