@@ -202,17 +202,17 @@ export class SefazAmClient {
 
   async checkStatus(cUF = '13'): Promise<SefazNormalizedResponse> {
     const tpAmb = this.environment === 'production' ? '1' : '2';
+    const ep = this.endpoints();
     const inner =
-      `<nfeDadosMsg xmlns="http://www.portalfiscal.inf.br/nfe/wsdl/NFeStatusServico4">` +
+      `<nfeDadosMsg xmlns="${ep.soap.statusNs}">` +
       `<consStatServ xmlns="http://www.portalfiscal.inf.br/nfe" versao="4.00">` +
       `<tpAmb>${tpAmb}</tpAmb><cUF>${cUF}</cUF><xServ>STATUS</xServ>` +
       `</consStatServ></nfeDadosMsg>`;
 
-    const ep = this.endpoints();
     const res = await postSoap({
       companyId: this.companyId,
       url: ep.status,
-      soapAction: 'http://www.portalfiscal.inf.br/nfe/wsdl/NFeStatusServico4/nfeStatusServicoNF',
+      soapAction: ep.soap.status,
       bodyInner: inner,
     });
     return parseAuthorizationResponse(res.body);
@@ -225,51 +225,73 @@ export class SefazAmClient {
       `<enviNFe xmlns="http://www.portalfiscal.inf.br/nfe" versao="4.00">` +
       `<idLote>${idLote}</idLote><indSinc>1</indSinc>${nfeClean}</enviNFe>`;
 
-    const inner =
-      `<nfeDadosMsg xmlns="http://www.portalfiscal.inf.br/nfe/wsdl/NFeAutorizacao4">${envi}</nfeDadosMsg>`;
-
     const ep = this.endpoints();
+    const inner = `<nfeDadosMsg xmlns="${ep.soap.authorizationNs}">${envi}</nfeDadosMsg>`;
+
     const res = await postSoap({
       companyId: this.companyId,
       url: ep.authorization,
-      soapAction: 'http://www.portalfiscal.inf.br/nfe/wsdl/NFeAutorizacao4/nfeAutorizacaoLote',
+      soapAction: ep.soap.authorization,
       bodyInner: inner,
     });
+
+    // Ambiente experimental: se SOAP antigo falhar, tenta Action 4.00 no mesmo host
+    if (
+      this.environment === 'development' &&
+      (!res.body || (!res.body.includes('cStat') && res.status >= 400))
+    ) {
+      const retry = await postSoap({
+        companyId: this.companyId,
+        url: ep.authorization,
+        soapAction: 'http://www.portalfiscal.inf.br/nfe/wsdl/NFeAutorizacao4/nfeAutorizacaoLote',
+        bodyInner: `<nfeDadosMsg xmlns="http://www.portalfiscal.inf.br/nfe/wsdl/NFeAutorizacao4">${envi}</nfeDadosMsg>`,
+      });
+      if (retry.body.includes('cStat')) {
+        return parseAuthorizationResponse(retry.body);
+      }
+    }
+
+    if (!res.body || res.status >= 500) {
+      throw new Error(
+        `SEFAZ não respondeu (${res.status}). Ambiente=${this.environment}. ` +
+          (this.environment === 'development'
+            ? 'No modo Development use o CSC experimental (000001 / 0123456789). Para contribuinte AM, prefira Homologação oficial.'
+            : 'Verifique certificado e conectividade.'),
+      );
+    }
+
     return parseAuthorizationResponse(res.body);
   }
 
   async consultNfce(accessKey: string): Promise<SefazNormalizedResponse> {
     const tpAmb = this.environment === 'production' ? '1' : '2';
+    const ep = this.endpoints();
     const cons =
       `<consSitNFe xmlns="http://www.portalfiscal.inf.br/nfe" versao="4.00">` +
       `<tpAmb>${tpAmb}</tpAmb><xServ>CONSULTAR</xServ>` +
       `<chNFe>${accessKey}</chNFe></consSitNFe>`;
-    const inner =
-      `<nfeDadosMsg xmlns="http://www.portalfiscal.inf.br/nfe/wsdl/NFeConsultaProtocolo4">${cons}</nfeDadosMsg>`;
+    const inner = `<nfeDadosMsg xmlns="${ep.soap.consultationNs}">${cons}</nfeDadosMsg>`;
 
-    const ep = this.endpoints();
     const res = await postSoap({
       companyId: this.companyId,
       url: ep.consultation,
-      soapAction:
-        'http://www.portalfiscal.inf.br/nfe/wsdl/NFeConsultaProtocolo4/nfeConsultaNF',
+      soapAction: ep.soap.consultation,
       bodyInner: inner,
     });
     return parseAuthorizationResponse(res.body);
   }
 
   async sendEvent(signedEventXml: string): Promise<SefazNormalizedResponse> {
+    const ep = this.endpoints();
     const envEvento =
       `<envEvento xmlns="http://www.portalfiscal.inf.br/nfe" versao="1.00">` +
       `<idLote>1</idLote>${signedEventXml.replace(/^<\?xml[^?]*\?>\s*/i, '')}</envEvento>`;
-    const inner =
-      `<nfeDadosMsg xmlns="http://www.portalfiscal.inf.br/nfe/wsdl/NFeRecepcaoEvento4">${envEvento}</nfeDadosMsg>`;
+    const inner = `<nfeDadosMsg xmlns="${ep.soap.eventNs}">${envEvento}</nfeDadosMsg>`;
 
-    const ep = this.endpoints();
     const res = await postSoap({
       companyId: this.companyId,
       url: ep.event,
-      soapAction: 'http://www.portalfiscal.inf.br/nfe/wsdl/NFeRecepcaoEvento4/nfeRecepcaoEvento',
+      soapAction: ep.soap.event,
       bodyInner: inner,
     });
     return parseAuthorizationResponse(res.body);

@@ -362,7 +362,8 @@ export async function getFiscalReadiness(companyId: string): Promise<FiscalReadi
     if (!config.logradouro || !config.municipio || !config.codigoMunicipio) {
       reasons.push('Endereço fiscal incompleto');
     }
-    if (!config.cscId || !config.hasCscToken) {
+    // Development SEFAZ-AM usa CSC experimental fixo — não exige CSC cadastrado
+    if (config.ambiente !== 'development' && (!config.cscId || !config.hasCscToken)) {
       reasons.push('CSC (token NFC-e) não configurado');
     }
   }

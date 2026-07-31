@@ -1,7 +1,11 @@
 import { query } from '../../../db/pool.js';
 import { decryptSecret } from '../secrets.js';
 import { getFiscalConfigRow } from '../config/fiscal-config.service.js';
-import { getSefazEndpoints, type FiscalEnvironment } from '../sefaz/sefaz-endpoints.js';
+import {
+  getSefazEndpoints,
+  resolveCscForEnvironment,
+  type FiscalEnvironment,
+} from '../sefaz/sefaz-endpoints.js';
 import { loadCompanyCertificate, signXmlEnveloped } from '../certificate/xml-signer.js';
 import { SefazAmClient } from '../sefaz/sefaz-client.js';
 import { buildAccessKey, onlyDigits, formatNFeDate, escapeXml } from './nfce-utils.js';
@@ -266,9 +270,6 @@ export async function createAndAuthorizeFromSale(params: {
 
   const config = await getFiscalConfigRow(companyId);
   if (!config || !config.enabled) throw new Error('Módulo fiscal desabilitado');
-  if (!config.csc_id || !config.csc_token_encrypted) {
-    throw new Error('CSC não configurado');
-  }
   if (config.ambiente === 'production') {
     // Permitir produção apenas se env explicitamente liberar
     if (process.env.FISCAL_ALLOW_PRODUCTION !== 'true') {
@@ -278,9 +279,15 @@ export async function createAndAuthorizeFromSale(params: {
     }
   }
 
-  const cscToken = decryptSecret(config.csc_token_encrypted);
   const env = config.ambiente as FiscalEnvironment;
   const endpoints = getSefazEndpoints(env);
+  // Development SEFAZ-AM: CSC experimental fixo (ignora CSC salvo — evita rejeição 464)
+  const configuredToken =
+    config.csc_token_encrypted != null ? decryptSecret(config.csc_token_encrypted) : '';
+  const { cscId, cscToken } = resolveCscForEnvironment(env, {
+    cscId: config.csc_id,
+    cscToken: configuredToken,
+  });
 
   let details: Record<string, unknown> = {};
   try {
@@ -424,7 +431,7 @@ export async function createAndAuthorizeFromSale(params: {
     items: builtItems,
     paymentMethod,
     total,
-    cscId: String(config.csc_id),
+    cscId,
     cscToken,
     qrCodeBaseUrl: endpoints.qrCode,
   });
@@ -440,7 +447,7 @@ export async function createAndAuthorizeFromSale(params: {
   const qrCodeUrl = buildQrCodeUrl({
     accessKey,
     ambiente: tpAmb(env),
-    cscId: String(config.csc_id),
+    cscId,
     cscToken,
     baseUrl: endpoints.qrCode,
   });
