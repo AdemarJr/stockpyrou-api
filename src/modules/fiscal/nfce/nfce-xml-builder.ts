@@ -3,7 +3,10 @@ import {
   formatNFeDate,
   mapPaymentCode,
   money,
+  nfeCodigoMunicipio,
+  nfeUnit,
   onlyDigits,
+  qty,
   sha1Hex,
 } from './nfce-utils.js';
 
@@ -62,36 +65,44 @@ export function buildNfceXml(input: NfceBuildInput): string {
   const cDV = input.accessKey.slice(43, 44);
   const natOp = 'VENDA';
   const isHomolog = input.ambiente === '2';
+  const cMun = nfeCodigoMunicipio(input.emit.codigoMunicipio);
+  const cep = onlyDigits(input.emit.cep).padStart(8, '0').slice(0, 8);
 
   const det = input.items
     .map((it) => {
       const desc = isHomolog
-        ? `NOTA FISCAL EMITIDA EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL`
+        ? 'NOTA FISCAL EMITIDA EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL'
         : escapeXml(it.description).slice(0, 120);
-      const csosn = it.csosn || '102';
+      const csosn = onlyDigits(it.csosn || '102').padStart(3, '0').slice(0, 3);
+      const ncm = onlyDigits(it.ncm).padStart(8, '0').slice(0, 8) || '21069090';
+      const cfop = onlyDigits(it.cfop).padStart(4, '0').slice(0, 4) || '5102';
+      const unidade = nfeUnit(it.unidade);
+      const q = qty(it.quantity);
+      const vUn = money(it.unitPrice);
+      const vProd = money(it.total);
       return (
         `<det nItem="${it.itemNumber}">` +
         `<prod>` +
         `<cProd>${escapeXml(String(it.itemNumber))}</cProd>` +
         `<cEAN>SEM GTIN</cEAN>` +
         `<xProd>${desc}</xProd>` +
-        `<NCM>${onlyDigits(it.ncm).padStart(8, '0').slice(0, 8)}</NCM>` +
-        `<CFOP>${onlyDigits(it.cfop).padStart(4, '0').slice(0, 4)}</CFOP>` +
-        `<uCom>${escapeXml(it.unidade || 'UN')}</uCom>` +
-        `<qCom>${money(it.quantity)}</qCom>` +
-        `<vUnCom>${money(it.unitPrice)}</vUnCom>` +
-        `<vProd>${money(it.total)}</vProd>` +
+        `<NCM>${ncm}</NCM>` +
+        `<CFOP>${cfop}</CFOP>` +
+        `<uCom>${unidade}</uCom>` +
+        `<qCom>${q}</qCom>` +
+        `<vUnCom>${vUn}</vUnCom>` +
+        `<vProd>${vProd}</vProd>` +
         `<cEANTrib>SEM GTIN</cEANTrib>` +
-        `<uTrib>${escapeXml(it.unidade || 'UN')}</uTrib>` +
-        `<qTrib>${money(it.quantity)}</qTrib>` +
-        `<vUnTrib>${money(it.unitPrice)}</vUnTrib>` +
+        `<uTrib>${unidade}</uTrib>` +
+        `<qTrib>${q}</qTrib>` +
+        `<vUnTrib>${vUn}</vUnTrib>` +
         `<indTot>1</indTot>` +
         `</prod>` +
         `<imposto>` +
         `<ICMS>` +
         (input.emit.crt === 1 || input.emit.crt === 2
-          ? `<ICMSSN102><orig>${it.origem}</orig><CSOSN>${csosn}</CSOSN></ICMSSN102>`
-          : `<ICMS00><orig>${it.origem}</orig><CST>${it.cst || '00'}</CST><modBC>3</modBC><vBC>0.00</vBC><pICMS>0.00</pICMS><vICMS>0.00</vICMS></ICMS00>`) +
+          ? `<ICMSSN102><orig>${Number(it.origem) || 0}</orig><CSOSN>${csosn}</CSOSN></ICMSSN102>`
+          : `<ICMS00><orig>${Number(it.origem) || 0}</orig><CST>${onlyDigits(it.cst || '00').padStart(2, '0').slice(0, 2)}</CST><modBC>3</modBC><vBC>0.00</vBC><pICMS>0.00</pICMS><vICMS>0.00</vICMS></ICMS00>`) +
         `</ICMS>` +
         `<PIS><PISNT><CST>07</CST></PISNT></PIS>` +
         `<COFINS><COFINSNT><CST>07</CST></COFINSNT></COFINS>` +
@@ -102,11 +113,13 @@ export function buildNfceXml(input: NfceBuildInput): string {
     .join('');
 
   const tPag = mapPaymentCode(input.paymentMethod);
+  // tPag=99 exige xPag no schema
+  const xPag = tPag === '99' ? `<xPag>Outros</xPag>` : '';
   const destBlock = input.dest
     ? `<dest>` +
       (input.dest.documentType === 'cnpj'
-        ? `<CNPJ>${input.dest.documentDigits}</CNPJ>`
-        : `<CPF>${input.dest.documentDigits}</CPF>`) +
+        ? `<CNPJ>${onlyDigits(input.dest.documentDigits).padStart(14, '0').slice(0, 14)}</CNPJ>`
+        : `<CPF>${onlyDigits(input.dest.documentDigits).padStart(11, '0').slice(0, 11)}</CPF>`) +
       `<xNome>${escapeXml(isHomolog ? 'NF-E EMITIDA EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL' : input.dest.name).slice(0, 60)}</xNome>` +
       `<indIEDest>9</indIEDest>` +
       `</dest>`
@@ -123,7 +136,7 @@ export function buildNfceXml(input: NfceBuildInput): string {
     `<dhEmi>${dhEmi}</dhEmi>` +
     `<tpNF>1</tpNF>` +
     `<idDest>1</idDest>` +
-    `<cMunFG>${onlyDigits(input.emit.codigoMunicipio)}</cMunFG>` +
+    `<cMunFG>${cMun}</cMunFG>` +
     `<tpImp>4</tpImp>` +
     `<tpEmis>${input.tipoEmissao}</tpEmis>` +
     `<cDV>${cDV}</cDV>` +
@@ -137,27 +150,27 @@ export function buildNfceXml(input: NfceBuildInput): string {
 
   const emit =
     `<emit>` +
-    `<CNPJ>${onlyDigits(input.emit.cnpj)}</CNPJ>` +
+    `<CNPJ>${onlyDigits(input.emit.cnpj).padStart(14, '0').slice(0, 14)}</CNPJ>` +
     `<xNome>${escapeXml(input.emit.razaoSocial).slice(0, 60)}</xNome>` +
     (input.emit.nomeFantasia
       ? `<xFant>${escapeXml(input.emit.nomeFantasia).slice(0, 60)}</xFant>`
       : '') +
     `<enderEmit>` +
-    `<xLgr>${escapeXml(input.emit.logradouro).slice(0, 60)}</xLgr>` +
-    `<nro>${escapeXml(input.emit.numero || 'S/N')}</nro>` +
+    `<xLgr>${escapeXml(input.emit.logradouro || 'NAO INFORMADO').slice(0, 60)}</xLgr>` +
+    `<nro>${escapeXml(input.emit.numero || 'S/N').slice(0, 60)}</nro>` +
     (input.emit.complemento
       ? `<xCpl>${escapeXml(input.emit.complemento).slice(0, 60)}</xCpl>`
       : '') +
-    `<xBairro>${escapeXml(input.emit.bairro).slice(0, 60)}</xBairro>` +
-    `<cMun>${onlyDigits(input.emit.codigoMunicipio)}</cMun>` +
-    `<xMun>${escapeXml(input.emit.municipio).slice(0, 60)}</xMun>` +
-    `<UF>${input.emit.uf}</UF>` +
-    `<CEP>${onlyDigits(input.emit.cep).padStart(8, '0')}</CEP>` +
+    `<xBairro>${escapeXml(input.emit.bairro || 'CENTRO').slice(0, 60)}</xBairro>` +
+    `<cMun>${cMun}</cMun>` +
+    `<xMun>${escapeXml(input.emit.municipio || 'Manaus').slice(0, 60)}</xMun>` +
+    `<UF>${(input.emit.uf || 'AM').toUpperCase().slice(0, 2)}</UF>` +
+    `<CEP>${cep}</CEP>` +
     `<cPais>1058</cPais>` +
-    `<xPais>BRASIL</xPais>` +
+    `<xPais>Brasil</xPais>` +
     `</enderEmit>` +
     `<IE>${onlyDigits(input.emit.ie)}</IE>` +
-    `<CRT>${input.emit.crt}</CRT>` +
+    `<CRT>${[1, 2, 3].includes(Number(input.emit.crt)) ? Number(input.emit.crt) : 1}</CRT>` +
     `</emit>`;
 
   const total =
@@ -175,6 +188,7 @@ export function buildNfceXml(input: NfceBuildInput): string {
   const pag =
     `<pag><detPag>` +
     `<tPag>${tPag}</tPag>` +
+    xPag +
     `<vPag>${money(input.total)}</vPag>` +
     `</detPag></pag>`;
 
@@ -212,6 +226,32 @@ export function buildQrCodeUrl(params: {
   const hash = sha1Hex(raw);
   const base = params.baseUrl.endsWith('?') ? params.baseUrl : `${params.baseUrl}?`;
   return `${base}p=${params.accessKey}|${versao}|${params.ambiente}|${cscId}|${hash}`;
+}
+
+/** Grupo obrigatório da NFC-e (mod 65): qrCode + urlChave. */
+export function buildInfNFeSupl(qrCodeUrl: string, urlChave: string): string {
+  return (
+    `<infNFeSupl>` +
+    `<qrCode><![CDATA[${qrCodeUrl}]]></qrCode>` +
+    `<urlChave>${escapeXml(urlChave)}</urlChave>` +
+    `</infNFeSupl>`
+  );
+}
+
+/**
+ * Insere infNFeSupl entre </infNFe> e <Signature> (ordem exigida pelo schema).
+ */
+export function attachInfNFeSupl(
+  signedNfeXml: string,
+  qrCodeUrl: string,
+  urlChave: string,
+): string {
+  if (signedNfeXml.includes('<infNFeSupl')) return signedNfeXml;
+  const supl = buildInfNFeSupl(qrCodeUrl, urlChave);
+  if (/<Signature[\s>]/i.test(signedNfeXml)) {
+    return signedNfeXml.replace(/<Signature[\s>]/i, (m) => `${supl}${m}`);
+  }
+  return signedNfeXml.replace(/<\/NFe>/i, `${supl}</NFe>`);
 }
 
 export function wrapNFeProc(signedNfeXml: string, protocolXml: string): string {

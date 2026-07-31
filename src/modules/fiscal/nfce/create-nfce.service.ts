@@ -5,7 +5,12 @@ import { getSefazEndpoints, type FiscalEnvironment } from '../sefaz/sefaz-endpoi
 import { loadCompanyCertificate, signXmlEnveloped } from '../certificate/xml-signer.js';
 import { SefazAmClient } from '../sefaz/sefaz-client.js';
 import { buildAccessKey, onlyDigits, formatNFeDate, escapeXml } from './nfce-utils.js';
-import { buildNfceXml, buildQrCodeUrl, wrapNFeProc } from './nfce-xml-builder.js';
+import {
+  attachInfNFeSupl,
+  buildNfceXml,
+  buildQrCodeUrl,
+  wrapNFeProc,
+} from './nfce-xml-builder.js';
 import { buildDanfeHtml, buildEmitAddressLines } from './danfe.js';
 
 async function writeFiscalLog(params: {
@@ -423,9 +428,11 @@ export async function createAndAuthorizeFromSale(params: {
 
   const cert = await loadCompanyCertificate(companyId);
   const signedInner = signXmlEnveloped(xmlOriginal, `NFe${accessKey}`, cert);
-  const signedXml =
+  let signedXml =
     `<?xml version="1.0" encoding="UTF-8"?>` +
-    (signedInner.startsWith('<NFe') ? signedInner : `<NFe xmlns="http://www.portalfiscal.inf.br/nfe">${signedInner}</NFe>`);
+    (signedInner.startsWith('<NFe')
+      ? signedInner
+      : `<NFe xmlns="http://www.portalfiscal.inf.br/nfe">${signedInner}</NFe>`);
 
   const qrCodeUrl = buildQrCodeUrl({
     accessKey,
@@ -434,6 +441,9 @@ export async function createAndAuthorizeFromSale(params: {
     cscToken,
     baseUrl: endpoints.qrCode,
   });
+
+  // NFC-e (mod 65): infNFeSupl com qrCode/urlChave é obrigatório no schema
+  signedXml = attachInfNFeSupl(signedXml, qrCodeUrl, endpoints.urlChave);
 
   // Insert draft (idempotente por company_id + idempotency_key)
   let nfceRow: Record<string, unknown> | undefined;
@@ -483,12 +493,34 @@ export async function createAndAuthorizeFromSale(params: {
   if (!nfceRow) throw new Error('Falha ao persistir NFC-e');
 
   const nfceId = String(nfceRow.id);
-  const signedXmlToSend =
-    (nfceRow.xml_assinado != null ? String(nfceRow.xml_assinado) : null) || signedXml;
+  const prevStatus = String(nfceRow.status || '');
+  // Reemissão após REJECTED/ERROR: usa XML novo (corrige schema). Senão reusa o assinado.
+  const reuseXml =
+    !isNew &&
+    prevStatus !== 'REJECTED' &&
+    prevStatus !== 'ERROR' &&
+    prevStatus !== 'DRAFT' &&
+    nfceRow.xml_assinado != null;
+  let signedXmlToSend = reuseXml ? String(nfceRow.xml_assinado) : signedXml;
   const accessKeyToUse =
     (nfceRow.chave_acesso != null ? String(nfceRow.chave_acesso) : null) || accessKey;
   const qrCodeUrlToUse =
     (nfceRow.qr_code_url != null ? String(nfceRow.qr_code_url) : null) || qrCodeUrl;
+
+  // Garante infNFeSupl mesmo em XML antigo persistido sem o bloco
+  signedXmlToSend = attachInfNFeSupl(signedXmlToSend, qrCodeUrlToUse, endpoints.urlChave);
+
+  if (!isNew && !reuseXml) {
+    await query(
+      `UPDATE nfce SET
+         xml_original = $1, xml_assinado = $2, qr_code_url = $3,
+         chave_acesso = $4, numero = $5, serie = $6,
+         status = 'SIGNED', motivo_status = NULL, codigo_status = NULL,
+         updated_at = now()
+       WHERE id = $7`,
+      [xmlOriginal, signedXmlToSend, qrCodeUrlToUse, accessKey, numero, serie, nfceId],
+    );
+  }
 
   if (isNew) {
     for (const it of builtItems) {

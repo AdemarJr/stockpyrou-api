@@ -12,7 +12,10 @@ export interface SefazEndpointSet {
   status: string;
   inutilization: string;
   event: string;
+  /** URL base do QR Code (com `?` final). */
   qrCode: string;
+  /** URL de consulta chave (tag urlChave do infNFeSupl), sem query. */
+  urlChave: string;
 }
 
 /** Homologação oficial de contribuintes */
@@ -29,6 +32,7 @@ export const sefazHomologation: SefazEndpointSet = {
     'https://homnfce.sefaz.am.gov.br/nfce-services/services/NfeInutilizacao4',
   event: 'https://homnfce.sefaz.am.gov.br/nfce-services/services/RecepcaoEvento4',
   qrCode: 'https://sistemas.sefaz.am.gov.br/nfceweb-hom/consultarNFCe.jsp?',
+  urlChave: 'https://sistemas.sefaz.am.gov.br/nfceweb-hom/consultarNFCe.jsp',
 };
 
 /** Produção */
@@ -42,6 +46,7 @@ export const sefazProduction: SefazEndpointSet = {
     'https://nfce.sefaz.am.gov.br/nfce-services/services/NfeInutilizacao4',
   event: 'https://nfce.sefaz.am.gov.br/nfce-services/services/RecepcaoEvento4',
   qrCode: 'https://sistemas.sefaz.am.gov.br/nfceweb/consultarNFCe.jsp?',
+  urlChave: 'https://sistemas.sefaz.am.gov.br/nfceweb/consultarNFCe.jsp',
 };
 
 /**
@@ -63,6 +68,7 @@ export const sefazDevelopment: SefazEndpointSet = {
   event:
     'https://homnfce.sefaz.am.gov.br/nfce-services-nac/services/RecepcaoEvento',
   qrCode: 'https://sistemas.sefaz.am.gov.br/nfceweb-hom/consultarNFCe.jsp?',
+  urlChave: 'https://sistemas.sefaz.am.gov.br/nfceweb-hom/consultarNFCe.jsp',
 };
 
 export const sefazEnvironmentConfig = {

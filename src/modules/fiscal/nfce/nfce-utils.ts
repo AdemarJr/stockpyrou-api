@@ -74,6 +74,28 @@ export function money(n: number): string {
   return (Math.round(Number(n) * 100) / 100).toFixed(2);
 }
 
+/** Quantidade comercial/tributável (TDec_1104 — até 4 casas). */
+export function qty(n: number): string {
+  return (Math.round(Number(n) * 10000) / 10000).toFixed(4);
+}
+
+/** Unidade de medida NFC-e (1–6 chars). */
+export function nfeUnit(raw: string | null | undefined): string {
+  const u = String(raw || 'UN')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '')
+    .slice(0, 6);
+  return u || 'UN';
+}
+
+/** Código IBGE município (7 dígitos). Default Manaus/AM. */
+export function nfeCodigoMunicipio(raw: string | null | undefined, fallback = '1302603'): string {
+  const d = onlyDigits(String(raw || ''));
+  if (d.length === 7) return d;
+  return fallback;
+}
+
 export function escapeXml(s: string): string {
   return String(s)
     .replace(/&/g, '&amp;')
