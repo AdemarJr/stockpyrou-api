@@ -16,6 +16,12 @@ import {
   getNfceRaw,
   listNfce,
   listPendingNfceSales,
+  syncInboundNfe,
+  listInboundNfe,
+  getInboundPreview,
+  resolveInboundSupplier,
+  markInboundImported,
+  ignoreInboundNfe,
   type FiscalEnvironment,
 } from '../modules/fiscal/index.js';
 
@@ -202,6 +208,102 @@ fiscal.get('/endpoints', async (c) => {
   const ambiente = (config?.ambiente || 'homologation') as FiscalEnvironment;
   const endpoints = getSefazEndpoints(ambiente);
   return c.json({ success: true, ambiente, endpoints });
+});
+
+/**
+ * NF-e de entrada (modelo 55) — Distribuição DF-e.
+ * Opção adicional ao Recebimento manual / import XML local.
+ */
+fiscal.post('/inbound/sync', async (c) => {
+  const companyId = c.get('companyId');
+  try {
+    const result = await syncInboundNfe(companyId);
+    return c.json({ success: true, ...result });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[fiscal/inbound/sync]', err);
+    if (/relation .* does not exist/i.test(message)) {
+      return c.json(
+        { error: 'Execute scripts/add_nfe_inbound_dfe.sql no banco EasyPanel' },
+        503,
+      );
+    }
+    if (/certificado|CNPJ|Configure/i.test(message)) {
+      return c.json({ error: message }, 400);
+    }
+    return c.json({ error: message }, 500);
+  }
+});
+
+fiscal.get('/inbound', async (c) => {
+  const companyId = c.get('companyId');
+  const status = c.req.query('status') || undefined;
+  const limit = Math.min(Number(c.req.query('limit') || 50), 200);
+  try {
+    const notes = await listInboundNfe(companyId, { status, limit });
+    return c.json({ success: true, notes });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (/relation .* does not exist/i.test(message)) {
+      return c.json({
+        success: true,
+        notes: [],
+        needsMigration: true,
+        error: 'Execute scripts/add_nfe_inbound_dfe.sql no banco',
+      });
+    }
+    return c.json({ error: message }, 500);
+  }
+});
+
+fiscal.get('/inbound/:id/preview', async (c) => {
+  const companyId = c.get('companyId');
+  try {
+    const preview = await getInboundPreview(companyId, c.req.param('id'));
+    if (!preview) return c.json({ error: 'Nota não encontrada' }, 404);
+    return c.json({ success: true, ...preview });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return c.json({ error: message }, 500);
+  }
+});
+
+fiscal.post('/inbound/:id/resolve-supplier', async (c) => {
+  const companyId = c.get('companyId');
+  const body = await c.req.json().catch(() => ({}));
+  try {
+    const result = await resolveInboundSupplier(
+      companyId,
+      c.req.param('id'),
+      body.supplierId ?? null,
+    );
+    return c.json({ success: true, ...result });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return c.json({ error: message }, 400);
+  }
+});
+
+fiscal.post('/inbound/:id/mark-imported', async (c) => {
+  const companyId = c.get('companyId');
+  try {
+    const note = await markInboundImported(companyId, c.req.param('id'));
+    return c.json({ success: true, note });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return c.json({ error: message }, 400);
+  }
+});
+
+fiscal.post('/inbound/:id/ignore', async (c) => {
+  const companyId = c.get('companyId');
+  try {
+    const note = await ignoreInboundNfe(companyId, c.req.param('id'));
+    return c.json({ success: true, note });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return c.json({ error: message }, 400);
+  }
 });
 
 /** Lista NFC-e recentes (filtros opcionais: from, to, status, limit). */

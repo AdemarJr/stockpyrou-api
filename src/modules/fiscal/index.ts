@@ -19,6 +19,14 @@ import {
   listNfce,
   listPendingNfceSales,
 } from './nfce/create-nfce.service.js';
+import {
+  getInboundPreview,
+  ignoreInboundNfe,
+  listInboundNfe,
+  markInboundImported,
+  resolveInboundSupplier,
+  syncInboundNfe,
+} from './inbound/inbound.service.js';
 
 export {
   getCertificateStatus,
@@ -35,6 +43,12 @@ export {
   getNfceRaw,
   listNfce,
   listPendingNfceSales,
+  syncInboundNfe,
+  listInboundNfe,
+  getInboundPreview,
+  resolveInboundSupplier,
+  markInboundImported,
+  ignoreInboundNfe,
 };
 
 export type { UpsertFiscalConfigInput, FiscalEnvironment };
