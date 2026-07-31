@@ -1,9 +1,14 @@
 /**
  * Endpoints oficiais NFC-e SEFAZ-AM (modelo 65, XML 4.00).
- * Nunca misturar URLs entre ambientes.
+ * Ambientes suportados: homologação e produção.
  */
 
-export type FiscalEnvironment = 'development' | 'homologation' | 'production';
+export type FiscalEnvironment = 'homologation' | 'production';
+
+/** Normaliza valor legado (ex.: development) para homologação ou produção. */
+export function normalizeFiscalEnvironment(raw: unknown): FiscalEnvironment {
+  return raw === 'production' ? 'production' : 'homologation';
+}
 
 export interface SefazSoapActions {
   authorization: string;
@@ -42,21 +47,6 @@ const soapV4: SefazSoapActions = {
   eventNs: 'http://www.portalfiscal.inf.br/nfe/wsdl/NFeRecepcaoEvento4',
 };
 
-/**
- * SOAP do ambiente experimental (nfce-services-nac).
- * Endpoints sem sufixo "4", mas aceitam layout 4.00.
- */
-const soapDevNac: SefazSoapActions = {
-  authorization: 'http://www.portalfiscal.inf.br/nfe/wsdl/NfeAutorizacao/nfeAutorizacaoLote',
-  authorizationNs: 'http://www.portalfiscal.inf.br/nfe/wsdl/NfeAutorizacao',
-  consultation: 'http://www.portalfiscal.inf.br/nfe/wsdl/NfeConsulta2/nfeConsultaNF2',
-  consultationNs: 'http://www.portalfiscal.inf.br/nfe/wsdl/NfeConsulta2',
-  status: 'http://www.portalfiscal.inf.br/nfe/wsdl/NfeStatusServico2/nfeStatusServicoNF2',
-  statusNs: 'http://www.portalfiscal.inf.br/nfe/wsdl/NfeStatusServico2',
-  event: 'http://www.portalfiscal.inf.br/nfe/wsdl/RecepcaoEvento/nfeRecepcaoEvento',
-  eventNs: 'http://www.portalfiscal.inf.br/nfe/wsdl/RecepcaoEvento',
-};
-
 /** Homologação oficial de contribuintes */
 export const sefazHomologation: SefazEndpointSet = {
   authorization:
@@ -90,41 +80,16 @@ export const sefazProduction: SefazEndpointSet = {
   soap: soapV4,
 };
 
-/**
- * Ambiente experimental SEFAZ-AM (desenvolvedores / software house).
- * NÃO confundir com homologação oficial do contribuinte.
- * CSC obrigatório neste ambiente: ID 000001 / token 0123456789.
- * @see https://portalnfce.sefaz.am.gov.br/desenvolvedor/ambiente-de-homologacao-para-desenvolvedores/
- */
-export const sefazDevelopment: SefazEndpointSet = {
-  authorization:
-    'https://homnfce.sefaz.am.gov.br/nfce-services-nac/services/NfeAutorizacao',
-  authorizationReturn:
-    'https://homnfce.sefaz.am.gov.br/nfce-services-nac/services/NfeRetAutorizacao',
-  consultation:
-    'https://homnfce.sefaz.am.gov.br/nfce-services-nac/services/NfeConsulta2',
-  status:
-    'https://homnfce.sefaz.am.gov.br/nfce-services-nac/services/NfeStatusServico2',
-  inutilization:
-    'https://homnfce.sefaz.am.gov.br/nfce-services-nac/services/NfeInutilizacao2',
-  event:
-    'https://homnfce.sefaz.am.gov.br/nfce-services-nac/services/RecepcaoEvento',
-  qrCode: 'https://sistemas.sefaz.am.gov.br/nfceweb-hom/consultarNFCe.jsp?',
-  urlChave: 'https://sistemas.sefaz.am.gov.br/nfceweb-hom/consultarNFCe.jsp',
-  soap: soapDevNac,
-};
-
 export const sefazEnvironmentConfig = {
-  development: sefazDevelopment,
   homologation: sefazHomologation,
   production: sefazProduction,
 } as const;
 
-export function getSefazEndpoints(env: FiscalEnvironment): SefazEndpointSet {
-  return sefazEnvironmentConfig[env];
+export function getSefazEndpoints(env: FiscalEnvironment | string): SefazEndpointSet {
+  return sefazEnvironmentConfig[normalizeFiscalEnvironment(env)];
 }
 
-/** CSC exclusivo do ambiente experimental (nunca usar em produção/homologação oficial). */
+/** CSC experimental do sandbox antigo — não usar em homologação/produção. */
 export const EXPERIMENTAL_CSC = {
   id: '000001',
   token: '0123456789',
@@ -144,33 +109,30 @@ export function isExperimentalCsc(cscId: string, cscToken: string): boolean {
   return id === '1' && token === EXPERIMENTAL_CSC.token;
 }
 
-/** Resolve CSC: no ambiente development SEFAZ-AM exige o CSC experimental fixo. */
+/** Resolve CSC cadastrado da empresa (homologação ou produção). */
 export function resolveCscForEnvironment(
-  env: FiscalEnvironment,
+  env: FiscalEnvironment | string,
   configured: { cscId?: string | null; cscToken?: string | null },
 ): { cscId: string; cscToken: string; forcedExperimental: boolean } {
-  if (env === 'development') {
-    return {
-      cscId: EXPERIMENTAL_CSC.id,
-      cscToken: EXPERIMENTAL_CSC.token,
-      forcedExperimental: true,
-    };
-  }
+  const ambiente = normalizeFiscalEnvironment(env);
   const cscId = String(configured.cscId || '').replace(/\D/g, '');
   const cscToken = normalizeCscToken(String(configured.cscToken || ''));
   if (!cscId || !cscToken) {
-    throw new Error('CSC não configurado para homologação/produção');
+    throw new Error(
+      ambiente === 'production'
+        ? 'CSC de produção não configurado'
+        : 'CSC de homologação não configurado',
+    );
   }
   if (isExperimentalCsc(cscId, cscToken)) {
     throw new Error(
-      'CSC experimental (000001 / 0123456789) só vale no ambiente Development. ' +
-        'Em Homologação, cadastre o CSC de homologação do portal da SEFAZ-AM (da sua empresa).',
+      'CSC experimental (000001 / 0123456789) não é válido. ' +
+        'Cadastre o CSC da sua empresa no portal SEFAZ-AM (homologação ou produção).',
     );
   }
-  // Manual: CSC alfanumérico tipicamente 16–36 caracteres
   if (cscToken.length < 8 || cscToken.length > 48) {
     throw new Error(
-      `Token CSC com tamanho inválido (${cscToken.length}). Confira no portal SEFAZ-AM o CSC de homologação.`,
+      `Token CSC com tamanho inválido (${cscToken.length}). Confira no portal SEFAZ-AM.`,
     );
   }
   return { cscId, cscToken, forcedExperimental: false };

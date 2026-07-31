@@ -2,7 +2,10 @@ import { query } from '../../../db/pool.js';
 import { getFiscalConfigRow } from '../config/fiscal-config.service.js';
 import { loadCompanyCertificate, signXmlEnveloped } from '../certificate/xml-signer.js';
 import { formatNFeDate, onlyDigits } from '../nfce/nfce-utils.js';
-import type { FiscalEnvironment } from '../sefaz/sefaz-endpoints.js';
+import {
+  normalizeFiscalEnvironment,
+  type FiscalEnvironment,
+} from '../sefaz/sefaz-endpoints.js';
 import { SefazDfeClient } from './dfe-client.js';
 import { parseNfeXml, parseResNfeXml, type ParsedNfeItem } from './nfe-xml-parse.js';
 
@@ -200,7 +203,7 @@ export async function syncInboundNfe(companyId: string, opts?: { maxLoops?: numb
   // Certificado obrigatório
   await loadCompanyCertificate(companyId);
 
-  const env = (config.ambiente || 'homologation') as FiscalEnvironment;
+  const env = normalizeFiscalEnvironment(config.ambiente);
   const client = new SefazDfeClient(companyId, env);
   const maxLoops = Math.min(opts?.maxLoops ?? 8, 20);
 

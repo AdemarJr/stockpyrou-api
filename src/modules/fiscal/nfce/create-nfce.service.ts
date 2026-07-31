@@ -3,6 +3,7 @@ import { decryptSecret } from '../secrets.js';
 import { getFiscalConfigRow } from '../config/fiscal-config.service.js';
 import {
   getSefazEndpoints,
+  normalizeFiscalEnvironment,
   resolveCscForEnvironment,
   type FiscalEnvironment,
 } from '../sefaz/sefaz-endpoints.js';
@@ -280,7 +281,7 @@ export async function createAndAuthorizeFromSale(params: {
     }
   }
 
-  const env = config.ambiente as FiscalEnvironment;
+  const env = normalizeFiscalEnvironment(config.ambiente);
   const endpoints = getSefazEndpoints(env);
   // Development SEFAZ-AM: CSC experimental fixo (ignora CSC salvo — evita rejeição 464)
   const configuredToken =
@@ -757,7 +758,7 @@ export async function cancelNfce(params: {
   const accessKey = String(raw.chave_acesso);
   const config = await getFiscalConfigRow(params.companyId);
   if (!config) throw new Error('Config fiscal ausente');
-  const env = config.ambiente as FiscalEnvironment;
+  const env = normalizeFiscalEnvironment(config.ambiente);
   const tpA = tpAmb(env);
   const nSeq = 1;
   const dhEvento = formatNFeDate(new Date());

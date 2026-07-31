@@ -235,28 +235,10 @@ export class SefazAmClient {
       bodyInner: inner,
     });
 
-    // Ambiente experimental: se SOAP antigo falhar, tenta Action 4.00 no mesmo host
-    if (
-      this.environment === 'development' &&
-      (!res.body || (!res.body.includes('cStat') && res.status >= 400))
-    ) {
-      const retry = await postSoap({
-        companyId: this.companyId,
-        url: ep.authorization,
-        soapAction: 'http://www.portalfiscal.inf.br/nfe/wsdl/NFeAutorizacao4/nfeAutorizacaoLote',
-        bodyInner: `<nfeDadosMsg xmlns="http://www.portalfiscal.inf.br/nfe/wsdl/NFeAutorizacao4">${envi}</nfeDadosMsg>`,
-      });
-      if (retry.body.includes('cStat')) {
-        return parseAuthorizationResponse(retry.body);
-      }
-    }
-
     if (!res.body || res.status >= 500) {
       throw new Error(
         `SEFAZ não respondeu (${res.status}). Ambiente=${this.environment}. ` +
-          (this.environment === 'development'
-            ? 'No modo Development use o CSC experimental (000001 / 0123456789). Para contribuinte AM, prefira Homologação oficial.'
-            : 'Verifique certificado e conectividade.'),
+          'Verifique certificado, CSC e conectividade.',
       );
     }
 

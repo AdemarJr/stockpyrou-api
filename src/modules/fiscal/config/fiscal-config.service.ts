@@ -1,6 +1,9 @@
 import { query } from '../../../db/pool.js';
 import { encryptSecret, maskToken, onlyDigits } from '../secrets.js';
-import type { FiscalEnvironment } from '../sefaz/sefaz-endpoints.js';
+import {
+  normalizeFiscalEnvironment,
+  type FiscalEnvironment,
+} from '../sefaz/sefaz-endpoints.js';
 
 export interface FiscalConfigRow {
   id: string;
@@ -128,7 +131,7 @@ function mapPublic(row: FiscalConfigRow, cscPlainHint?: string | null): FiscalCo
     email: row.email != null ? String(row.email) : null,
     logoUrl: row.logo_url != null ? String(row.logo_url) : null,
     crt: Number(row.crt) || 1,
-    ambiente: (row.ambiente as FiscalEnvironment) || 'homologation',
+    ambiente: normalizeFiscalEnvironment(row.ambiente),
     serieNfce: Number(row.serie_nfce) || 1,
     numeroNfce: Number(row.numero_nfce) || 0,
     cscId: row.csc_id != null ? String(row.csc_id) : null,
@@ -144,6 +147,33 @@ function mapPublic(row: FiscalConfigRow, cscPlainHint?: string | null): FiscalCo
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+let respTecColumnsReady: boolean | null = null;
+
+async function ensureRespTecColumns(): Promise<boolean> {
+  if (respTecColumnsReady === true) return true;
+  if (respTecColumnsReady === false) return false;
+  try {
+    await query(`
+      ALTER TABLE public.fiscal_config
+        ADD COLUMN IF NOT EXISTS resp_tec_cnpj text NULL,
+        ADD COLUMN IF NOT EXISTS resp_tec_contato text NULL,
+        ADD COLUMN IF NOT EXISTS resp_tec_email text NULL,
+        ADD COLUMN IF NOT EXISTS resp_tec_fone text NULL,
+        ADD COLUMN IF NOT EXISTS resp_tec_id_csrt text NULL,
+        ADD COLUMN IF NOT EXISTS resp_tec_csrt_encrypted text NULL
+    `);
+    respTecColumnsReady = true;
+    return true;
+  } catch (err) {
+    respTecColumnsReady = false;
+    console.warn(
+      '[fiscal] Não foi possível criar colunas resp_tec_*:',
+      err instanceof Error ? err.message : err,
+    );
+    return false;
+  }
 }
 
 async function persistRespTec(
@@ -164,57 +194,54 @@ async function persistRespTec(
       ? encryptSecret(String(input.respTecCsrt).replace(/\s+/g, '').trim())
       : null;
 
-  try {
-    const { rows } = await query(
-      `UPDATE fiscal_config SET
-         resp_tec_cnpj = CASE WHEN $1::boolean THEN $2 ELSE resp_tec_cnpj END,
-         resp_tec_contato = CASE WHEN $3::boolean THEN $4 ELSE resp_tec_contato END,
-         resp_tec_email = CASE WHEN $5::boolean THEN $6 ELSE resp_tec_email END,
-         resp_tec_fone = CASE WHEN $7::boolean THEN $8 ELSE resp_tec_fone END,
-         resp_tec_id_csrt = CASE WHEN $9::boolean THEN $10 ELSE resp_tec_id_csrt END,
-         resp_tec_csrt_encrypted = COALESCE($11, resp_tec_csrt_encrypted),
-         updated_at = now()
-       WHERE company_id = $12
-       RETURNING *`,
-      [
-        input.respTecCnpj !== undefined,
-        input.respTecCnpj !== undefined
-          ? onlyDigits(input.respTecCnpj || '') || null
-          : null,
-        input.respTecContato !== undefined,
-        input.respTecContato !== undefined
-          ? String(input.respTecContato || '').trim() || null
-          : null,
-        input.respTecEmail !== undefined,
-        input.respTecEmail !== undefined
-          ? String(input.respTecEmail || '').trim() || null
-          : null,
-        input.respTecFone !== undefined,
-        input.respTecFone !== undefined
-          ? onlyDigits(input.respTecFone || '') || null
-          : null,
-        input.respTecIdCsrt !== undefined,
-        input.respTecIdCsrt !== undefined
-          ? onlyDigits(input.respTecIdCsrt || '').slice(0, 2) || null
-          : null,
-        csrtEncrypted,
-        companyId,
-      ],
+  const ok = await ensureRespTecColumns();
+  if (!ok) {
+    throw new Error(
+      'Não foi possível gravar o responsável técnico (colunas ausentes no banco). Rode scripts/add_fiscal_resp_tec.sql.',
     );
-    return (rows[0] as FiscalConfigRow) ?? null;
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (/resp_tec|column/i.test(msg)) {
-      console.warn(
-        '[fiscal] Colunas resp_tec_* ausentes. Rode scripts/add_fiscal_resp_tec.sql ou use RESP_TEC_* no .env',
-      );
-      return null;
-    }
-    throw err;
   }
+
+  const { rows } = await query(
+    `UPDATE fiscal_config SET
+       resp_tec_cnpj = CASE WHEN $1::boolean THEN $2 ELSE resp_tec_cnpj END,
+       resp_tec_contato = CASE WHEN $3::boolean THEN $4 ELSE resp_tec_contato END,
+       resp_tec_email = CASE WHEN $5::boolean THEN $6 ELSE resp_tec_email END,
+       resp_tec_fone = CASE WHEN $7::boolean THEN $8 ELSE resp_tec_fone END,
+       resp_tec_id_csrt = CASE WHEN $9::boolean THEN $10 ELSE resp_tec_id_csrt END,
+       resp_tec_csrt_encrypted = COALESCE($11, resp_tec_csrt_encrypted),
+       updated_at = now()
+     WHERE company_id = $12
+     RETURNING *`,
+    [
+      input.respTecCnpj !== undefined,
+      input.respTecCnpj !== undefined
+        ? onlyDigits(input.respTecCnpj || '') || null
+        : null,
+      input.respTecContato !== undefined,
+      input.respTecContato !== undefined
+        ? String(input.respTecContato || '').trim() || null
+        : null,
+      input.respTecEmail !== undefined,
+      input.respTecEmail !== undefined
+        ? String(input.respTecEmail || '').trim() || null
+        : null,
+      input.respTecFone !== undefined,
+      input.respTecFone !== undefined
+        ? onlyDigits(input.respTecFone || '') || null
+        : null,
+      input.respTecIdCsrt !== undefined,
+      input.respTecIdCsrt !== undefined
+        ? onlyDigits(input.respTecIdCsrt || '').slice(0, 2) || null
+        : null,
+      csrtEncrypted,
+      companyId,
+    ],
+  );
+  return (rows[0] as FiscalConfigRow) ?? null;
 }
 
 export async function getFiscalConfig(companyId: string): Promise<FiscalConfigPublic | null> {
+  await ensureRespTecColumns();
   const { rows } = await query(
     `SELECT * FROM fiscal_config WHERE company_id = $1 LIMIT 1`,
     [companyId],
@@ -224,6 +251,7 @@ export async function getFiscalConfig(companyId: string): Promise<FiscalConfigPu
 }
 
 export async function getFiscalConfigRow(companyId: string): Promise<FiscalConfigRow | null> {
+  await ensureRespTecColumns();
   const { rows } = await query(
     `SELECT * FROM fiscal_config WHERE company_id = $1 LIMIT 1`,
     [companyId],
@@ -243,12 +271,7 @@ export async function saveFiscalConfig(
   const razaoSocial = String(input.razaoSocial || '').trim();
   if (!razaoSocial) throw new Error('Razão social é obrigatória');
 
-  const ambiente: FiscalEnvironment =
-    input.ambiente === 'production' ||
-    input.ambiente === 'development' ||
-    input.ambiente === 'homologation'
-      ? input.ambiente
-      : 'homologation';
+  const ambiente = normalizeFiscalEnvironment(input.ambiente);
 
   const crt = [1, 2, 3].includes(Number(input.crt)) ? Number(input.crt) : 1;
   const serie = Math.max(1, Number(input.serieNfce) || 1);
@@ -463,8 +486,7 @@ export async function getFiscalReadiness(companyId: string): Promise<FiscalReadi
     if (!config.logradouro || !config.municipio || !config.codigoMunicipio) {
       reasons.push('Endereço fiscal incompleto');
     }
-    // Development SEFAZ-AM usa CSC experimental fixo — não exige CSC cadastrado
-    if (config.ambiente !== 'development' && (!config.cscId || !config.hasCscToken)) {
+    if (!config.cscId || !config.hasCscToken) {
       reasons.push('CSC (token NFC-e) não configurado');
     }
     const respTecCnpj =
