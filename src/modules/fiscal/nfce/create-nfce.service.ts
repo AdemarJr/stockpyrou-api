@@ -664,9 +664,18 @@ export async function createAndAuthorizeFromSale(params: {
     );
 
     const updated = await getNfceById(companyId, nfceId);
+    let message = `NFC-e rejeitada: ${sefazRes.statusCode} — ${sefazRes.statusMessage}`;
+    // 464: hash do QR ≠ SEFAZ — quase sempre CSC/ID de homologação incorreto
+    if (
+      sefazRes.statusCode === '464' ||
+      /hash no qr-?code|hash.*qr/i.test(sefazRes.statusMessage || '')
+    ) {
+      message +=
+        '. Confira em Configurações → Fiscal o ID do CSC e o Token CSC de HOMOLOGAÇÃO do portal SEFAZ-AM (não use o CSC experimental 0123456789). Salve de novo o token e reemita.';
+    }
     return {
       nfce: updated!,
-      message: `NFC-e rejeitada: ${sefazRes.statusCode} — ${sefazRes.statusMessage}`,
+      message,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

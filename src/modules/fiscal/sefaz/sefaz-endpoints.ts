@@ -130,6 +130,20 @@ export const EXPERIMENTAL_CSC = {
   token: '0123456789',
 } as const;
 
+/** Normaliza token CSC (remove espaços/quebras; mantém hífens e caixa). */
+export function normalizeCscToken(raw: string): string {
+  return String(raw || '')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '') // zero-width
+    .replace(/\s+/g, '')
+    .trim();
+}
+
+export function isExperimentalCsc(cscId: string, cscToken: string): boolean {
+  const id = String(Number(String(cscId).replace(/\D/g, '') || '0'));
+  const token = normalizeCscToken(cscToken);
+  return id === '1' && token === EXPERIMENTAL_CSC.token;
+}
+
 /** Resolve CSC: no ambiente development SEFAZ-AM exige o CSC experimental fixo. */
 export function resolveCscForEnvironment(
   env: FiscalEnvironment,
@@ -142,10 +156,22 @@ export function resolveCscForEnvironment(
       forcedExperimental: true,
     };
   }
-  const cscId = String(configured.cscId || '').trim();
-  const cscToken = String(configured.cscToken || '').trim();
+  const cscId = String(configured.cscId || '').replace(/\D/g, '');
+  const cscToken = normalizeCscToken(String(configured.cscToken || ''));
   if (!cscId || !cscToken) {
-    throw new Error('CSC não configurado');
+    throw new Error('CSC não configurado para homologação/produção');
+  }
+  if (isExperimentalCsc(cscId, cscToken)) {
+    throw new Error(
+      'CSC experimental (000001 / 0123456789) só vale no ambiente Development. ' +
+        'Em Homologação, cadastre o CSC de homologação do portal da SEFAZ-AM (da sua empresa).',
+    );
+  }
+  // Manual: CSC alfanumérico tipicamente 16–36 caracteres
+  if (cscToken.length < 8 || cscToken.length > 48) {
+    throw new Error(
+      `Token CSC com tamanho inválido (${cscToken.length}). Confira no portal SEFAZ-AM o CSC de homologação.`,
+    );
   }
   return { cscId, cscToken, forcedExperimental: false };
 }

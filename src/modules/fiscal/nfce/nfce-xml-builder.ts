@@ -346,9 +346,16 @@ export function buildQrCodeUrl(params: {
 }): string {
   const versao = '2';
   const cscId = formatCscIdForQr(params.cscId);
-  const csc = String(params.cscToken || '').trim();
+  // Manual DANFE NFC-e: sem espaços; CSC colado após cIdToken (sem "|")
+  const csc = String(params.cscToken || '').replace(/\s+/g, '').trim();
+  if (!params.accessKey || params.accessKey.length !== 44) {
+    throw new Error('Chave de acesso inválida para QR Code NFC-e');
+  }
+  if (!csc) {
+    throw new Error('CSC vazio — não é possível calcular o hash do QR Code');
+  }
   const seq = `${params.accessKey}|${versao}|${params.ambiente}|${cscId}`;
-  // Importante: CSC concatenado direto (sem "|") — rejeição 464 se houver pipe
+  // SHA-1( chNFe|2|tpAmb|cIdToken + CSC ) — rejeição 464 se houver "|" antes do CSC
   const hash = sha1Hex(`${seq}${csc}`);
   let urlBase = params.baseUrl.trim();
   if (urlBase.includes('?p=')) {

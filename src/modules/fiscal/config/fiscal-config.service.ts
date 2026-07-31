@@ -164,12 +164,15 @@ export async function saveFiscalConfig(
   let cscEncrypted = existing?.csc_token_encrypted ?? null;
   let cscPlainHint: string | null = null;
   if (input.cscToken != null && String(input.cscToken).trim() !== '') {
-    cscPlainHint = String(input.cscToken).trim();
+    // Remove espaços/quebras colados do portal (causa comum da rejeição 464)
+    cscPlainHint = String(input.cscToken).replace(/\s+/g, '').trim();
     cscEncrypted = encryptSecret(cscPlainHint);
   }
 
   const cscId =
-    input.cscId !== undefined ? input.cscId?.trim() || null : existing?.csc_id ?? null;
+    input.cscId !== undefined
+      ? input.cscId?.replace(/\D/g, '') || null
+      : existing?.csc_id ?? null;
   const enabled = input.enabled !== undefined ? !!input.enabled : existing?.enabled ?? false;
 
   const telefone =
