@@ -335,9 +335,21 @@ export function signXmlEnveloped(
   return working + signatureXml;
 }
 
+/**
+ * Credenciais TLS para mTLS com a SEFAZ.
+ * Usa PEM (key+cert) em vez do PFX bruto — OpenSSL 3 do Node rejeita muitos A1
+ * brasileiros com "Unsupported PKCS12 PFX data" (RC2/legado).
+ */
+export async function getTlsCredentials(
+  companyId: string,
+): Promise<{ key: string; cert: string }> {
+  const cert = await loadCompanyCertificate(companyId);
+  return { key: cert.privateKeyPem, cert: cert.certificatePem };
+}
+
+/** @deprecated Prefira getTlsCredentials — PFX legado falha no Node/OpenSSL 3. */
 export async function getPfxBufferForTls(
   companyId: string,
-): Promise<{ pfx: Buffer; passphrase: string }> {
-  const cert = await loadCompanyCertificate(companyId);
-  return { pfx: cert.pfx, passphrase: cert.passphrase };
+): Promise<{ pfx: Buffer; passphrase: string } | { key: string; cert: string }> {
+  return getTlsCredentials(companyId);
 }

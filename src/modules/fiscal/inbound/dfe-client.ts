@@ -1,7 +1,7 @@
 import https from 'node:https';
 import { gunzipSync } from 'node:zlib';
 import { XMLParser } from 'fast-xml-parser';
-import { getPfxBufferForTls } from '../certificate/xml-signer.js';
+import { getTlsCredentials } from '../certificate/xml-signer.js';
 import type { FiscalEnvironment } from '../sefaz/sefaz-endpoints.js';
 
 const parser = new XMLParser({
@@ -40,7 +40,7 @@ async function postSoap(params: {
   bodyInner: string;
   timeoutMs?: number;
 }): Promise<{ status: number; body: string; durationMs: number }> {
-  const { pfx, passphrase } = await getPfxBufferForTls(params.companyId);
+  const tls = await getTlsCredentials(params.companyId);
   const payload = soapEnvelope(params.bodyInner);
   const timeout = params.timeoutMs ?? Number(process.env.SEFAZ_DFE_TIMEOUT || 45000);
   const started = Date.now();
@@ -53,8 +53,8 @@ async function postSoap(params: {
         port: url.port || 443,
         path: url.pathname + url.search,
         method: 'POST',
-        pfx,
-        passphrase,
+        key: tls.key,
+        cert: tls.cert,
         rejectUnauthorized: true,
         headers: {
           'Content-Type': `application/soap+xml; charset=utf-8; action="${params.soapAction}"`,
