@@ -9,6 +9,7 @@ import {
   qty,
   sha1Hex,
 } from './nfce-utils.js';
+import { buildInfRespTecXml, type RespTecConfig } from './resp-tec.js';
 
 export interface NfceBuildInput {
   accessKey: string;
@@ -55,6 +56,8 @@ export interface NfceBuildInput {
   cscId: string;
   cscToken: string;
   qrCodeBaseUrl: string;
+  /** Responsável técnico (software house) — obrigatório na SEFAZ-AM (972). */
+  respTec: RespTecConfig;
 }
 
 /** Alíquotas de transição 2026 (NT 2025.002) — tributação integral. */
@@ -302,6 +305,8 @@ export function buildNfceXml(input: NfceBuildInput): string {
     `<vPag>${money(input.total)}</vPag>` +
     `</detPag></pag>`;
 
+  const infRespTec = buildInfRespTecXml(input.accessKey, input.respTec);
+
   const infNFe =
     `<infNFe versao="4.00" Id="${infId}">` +
     ide +
@@ -311,6 +316,7 @@ export function buildNfceXml(input: NfceBuildInput): string {
     total +
     `<transp><modFrete>9</modFrete></transp>` +
     pag +
+    infRespTec +
     `</infNFe>`;
 
   return (

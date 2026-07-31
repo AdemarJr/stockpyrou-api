@@ -16,6 +16,7 @@ import {
   wrapNFeProc,
 } from './nfce-xml-builder.js';
 import { buildDanfeHtml, buildEmitAddressLines } from './danfe.js';
+import { resolveRespTec } from './resp-tec.js';
 
 async function writeFiscalLog(params: {
   companyId: string;
@@ -405,6 +406,23 @@ export async function createAndAuthorizeFromSale(params: {
   const total = Number(sale.total) || builtItems.reduce((s, i) => s + i.total, 0);
   const paymentMethod = String(sale.payment_method || 'money');
 
+  let respTecCsrt: string | null = null;
+  if (config.resp_tec_csrt_encrypted) {
+    try {
+      respTecCsrt = decryptSecret(config.resp_tec_csrt_encrypted);
+    } catch {
+      respTecCsrt = null;
+    }
+  }
+  const respTec = resolveRespTec({
+    cnpj: config.resp_tec_cnpj ?? null,
+    xContato: config.resp_tec_contato ?? null,
+    email: config.resp_tec_email ?? null,
+    fone: config.resp_tec_fone ?? null,
+    idCsrt: config.resp_tec_id_csrt ?? null,
+    csrt: respTecCsrt,
+  });
+
   const xmlOriginal = buildNfceXml({
     accessKey,
     numero,
@@ -434,6 +452,7 @@ export async function createAndAuthorizeFromSale(params: {
     cscId,
     cscToken,
     qrCodeBaseUrl: endpoints.qrCode,
+    respTec,
   });
 
   const cert = await loadCompanyCertificate(companyId);

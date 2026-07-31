@@ -107,6 +107,12 @@ fiscal.put('/config', async (c) => {
     numeroNfce: body.numeroNfce != null ? Number(body.numeroNfce) : undefined,
     cscId: body.cscId ?? body.csc_id ?? undefined,
     cscToken: body.cscToken ?? body.csc_token ?? undefined,
+    respTecCnpj: body.respTecCnpj ?? body.resp_tec_cnpj ?? undefined,
+    respTecContato: body.respTecContato ?? body.resp_tec_contato ?? undefined,
+    respTecEmail: body.respTecEmail ?? body.resp_tec_email ?? undefined,
+    respTecFone: body.respTecFone ?? body.resp_tec_fone ?? undefined,
+    respTecIdCsrt: body.respTecIdCsrt ?? body.resp_tec_id_csrt ?? undefined,
+    respTecCsrt: body.respTecCsrt ?? body.resp_tec_csrt ?? undefined,
     enabled: body.enabled != null ? !!body.enabled : undefined,
   };
 

@@ -26,6 +26,12 @@ export interface FiscalConfigRow {
   numero_nfce: number;
   csc_id: string | null;
   csc_token_encrypted: string | null;
+  resp_tec_cnpj?: string | null;
+  resp_tec_contato?: string | null;
+  resp_tec_email?: string | null;
+  resp_tec_fone?: string | null;
+  resp_tec_id_csrt?: string | null;
+  resp_tec_csrt_encrypted?: string | null;
   enabled: boolean;
   created_at: unknown;
   updated_at: unknown;
@@ -56,6 +62,12 @@ export interface FiscalConfigPublic {
   cscId: string | null;
   hasCscToken: boolean;
   cscTokenMasked: string | null;
+  respTecCnpj: string | null;
+  respTecContato: string | null;
+  respTecEmail: string | null;
+  respTecFone: string | null;
+  respTecIdCsrt: string | null;
+  hasRespTecCsrt: boolean;
   enabled: boolean;
   createdAt: unknown;
   updatedAt: unknown;
@@ -85,6 +97,14 @@ export interface UpsertFiscalConfigInput {
   cscId?: string | null;
   /** Se omitido/null/vazio, mantém o CSC já salvo. */
   cscToken?: string | null;
+  /** Responsável técnico (software house) — NT 2018.005 / rejeição 972. */
+  respTecCnpj?: string | null;
+  respTecContato?: string | null;
+  respTecEmail?: string | null;
+  respTecFone?: string | null;
+  respTecIdCsrt?: string | null;
+  /** Se omitido/vazio, mantém o CSRT já salvo. */
+  respTecCsrt?: string | null;
   enabled?: boolean;
 }
 
@@ -114,10 +134,84 @@ function mapPublic(row: FiscalConfigRow, cscPlainHint?: string | null): FiscalCo
     cscId: row.csc_id != null ? String(row.csc_id) : null,
     hasCscToken: !!row.csc_token_encrypted,
     cscTokenMasked: maskToken(cscPlainHint) ?? (row.csc_token_encrypted ? '********' : null),
+    respTecCnpj: row.resp_tec_cnpj != null ? String(row.resp_tec_cnpj) : null,
+    respTecContato: row.resp_tec_contato != null ? String(row.resp_tec_contato) : null,
+    respTecEmail: row.resp_tec_email != null ? String(row.resp_tec_email) : null,
+    respTecFone: row.resp_tec_fone != null ? String(row.resp_tec_fone) : null,
+    respTecIdCsrt: row.resp_tec_id_csrt != null ? String(row.resp_tec_id_csrt) : null,
+    hasRespTecCsrt: !!row.resp_tec_csrt_encrypted,
     enabled: !!row.enabled,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+async function persistRespTec(
+  companyId: string,
+  input: UpsertFiscalConfigInput,
+): Promise<FiscalConfigRow | null> {
+  const hasAny =
+    input.respTecCnpj !== undefined ||
+    input.respTecContato !== undefined ||
+    input.respTecEmail !== undefined ||
+    input.respTecFone !== undefined ||
+    input.respTecIdCsrt !== undefined ||
+    (input.respTecCsrt != null && String(input.respTecCsrt).trim() !== '');
+  if (!hasAny) return null;
+
+  const csrtEncrypted =
+    input.respTecCsrt != null && String(input.respTecCsrt).trim() !== ''
+      ? encryptSecret(String(input.respTecCsrt).replace(/\s+/g, '').trim())
+      : null;
+
+  try {
+    const { rows } = await query(
+      `UPDATE fiscal_config SET
+         resp_tec_cnpj = CASE WHEN $1::boolean THEN $2 ELSE resp_tec_cnpj END,
+         resp_tec_contato = CASE WHEN $3::boolean THEN $4 ELSE resp_tec_contato END,
+         resp_tec_email = CASE WHEN $5::boolean THEN $6 ELSE resp_tec_email END,
+         resp_tec_fone = CASE WHEN $7::boolean THEN $8 ELSE resp_tec_fone END,
+         resp_tec_id_csrt = CASE WHEN $9::boolean THEN $10 ELSE resp_tec_id_csrt END,
+         resp_tec_csrt_encrypted = COALESCE($11, resp_tec_csrt_encrypted),
+         updated_at = now()
+       WHERE company_id = $12
+       RETURNING *`,
+      [
+        input.respTecCnpj !== undefined,
+        input.respTecCnpj !== undefined
+          ? onlyDigits(input.respTecCnpj || '') || null
+          : null,
+        input.respTecContato !== undefined,
+        input.respTecContato !== undefined
+          ? String(input.respTecContato || '').trim() || null
+          : null,
+        input.respTecEmail !== undefined,
+        input.respTecEmail !== undefined
+          ? String(input.respTecEmail || '').trim() || null
+          : null,
+        input.respTecFone !== undefined,
+        input.respTecFone !== undefined
+          ? onlyDigits(input.respTecFone || '') || null
+          : null,
+        input.respTecIdCsrt !== undefined,
+        input.respTecIdCsrt !== undefined
+          ? onlyDigits(input.respTecIdCsrt || '').slice(0, 2) || null
+          : null,
+        csrtEncrypted,
+        companyId,
+      ],
+    );
+    return (rows[0] as FiscalConfigRow) ?? null;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/resp_tec|column/i.test(msg)) {
+      console.warn(
+        '[fiscal] Colunas resp_tec_* ausentes. Rode scripts/add_fiscal_resp_tec.sql ou use RESP_TEC_* no .env',
+      );
+      return null;
+    }
+    throw err;
+  }
 }
 
 export async function getFiscalConfig(companyId: string): Promise<FiscalConfigPublic | null> {
@@ -228,7 +322,8 @@ export async function saveFiscalConfig(
          RETURNING *`,
         params,
       );
-      return mapPublic(rows[0] as FiscalConfigRow, cscPlainHint);
+      const updated = await persistRespTec(companyId, input);
+      return mapPublic((updated ?? rows[0]) as FiscalConfigRow, cscPlainHint);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (!/telefone|logo_url|column/i.test(msg)) throw err;
@@ -267,7 +362,8 @@ export async function saveFiscalConfig(
          RETURNING *`,
         legacy,
       );
-      return mapPublic(rows[0] as FiscalConfigRow, cscPlainHint);
+      const updated = await persistRespTec(companyId, input);
+      return mapPublic((updated ?? rows[0]) as FiscalConfigRow, cscPlainHint);
     }
   }
 
@@ -283,7 +379,8 @@ export async function saveFiscalConfig(
        ) RETURNING *`,
       params,
     );
-    return mapPublic(rows[0] as FiscalConfigRow, cscPlainHint);
+    const updated = await persistRespTec(companyId, input);
+    return mapPublic((updated ?? rows[0]) as FiscalConfigRow, cscPlainHint);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (!/telefone|logo_url|column/i.test(msg)) throw err;
@@ -320,7 +417,8 @@ export async function saveFiscalConfig(
        ) RETURNING *`,
       legacy,
     );
-    return mapPublic(rows[0] as FiscalConfigRow, cscPlainHint);
+    const updated = await persistRespTec(companyId, input);
+    return mapPublic((updated ?? rows[0]) as FiscalConfigRow, cscPlainHint);
   }
 }
 
@@ -368,6 +466,16 @@ export async function getFiscalReadiness(companyId: string): Promise<FiscalReadi
     // Development SEFAZ-AM usa CSC experimental fixo — não exige CSC cadastrado
     if (config.ambiente !== 'development' && (!config.cscId || !config.hasCscToken)) {
       reasons.push('CSC (token NFC-e) não configurado');
+    }
+    const respTecCnpj =
+      onlyDigits(config.respTecCnpj || process.env.RESP_TEC_CNPJ || '');
+    const respTecOk =
+      respTecCnpj.length === 14 &&
+      !!(config.respTecContato || process.env.RESP_TEC_CONTATO) &&
+      !!(config.respTecEmail || process.env.RESP_TEC_EMAIL) &&
+      onlyDigits(config.respTecFone || process.env.RESP_TEC_FONE || '').length >= 6;
+    if (!respTecOk) {
+      reasons.push('Responsável técnico incompleto (obrigatório na SEFAZ-AM — rejeição 972)');
     }
   }
 
