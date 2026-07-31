@@ -320,10 +320,6 @@ export function buildNfceXml(input: NfceBuildInput): string {
 }
 
 /**
- * QR Code NFC-e (versão 2) — URL + hash CSC.
- * cHashQRCode = SHA-1(chave|versao|tpAmb|cscId|cscToken) hex upper
- */
-/**
  * cIdToken no QR Code v2 — XSD exige `(0|[1-9][0-9]{0,5})` (sem zeros à esquerda).
  * Ex.: CSC cadastrado como "000001" deve ir como "1" na URL e no hash.
  */
@@ -335,6 +331,12 @@ export function formatCscIdForQr(cscId: string): string {
   return String(Math.trunc(n)).slice(0, 6);
 }
 
+/**
+ * QR Code NFC-e v2 (online):
+ *   URL:  ...?p=chNFe|2|tpAmb|cIdToken|cHashQRCode
+ *   Hash: SHA-1( chNFe|2|tpAmb|cIdToken + CSC )  ← CSC sem "|" antes
+ * Manual DANFE NFC-e QR Code / nfephp get200.
+ */
 export function buildQrCodeUrl(params: {
   accessKey: string;
   ambiente: '1' | '2';
@@ -344,10 +346,21 @@ export function buildQrCodeUrl(params: {
 }): string {
   const versao = '2';
   const cscId = formatCscIdForQr(params.cscId);
-  const raw = `${params.accessKey}|${versao}|${params.ambiente}|${cscId}|${params.cscToken}`;
-  const hash = sha1Hex(raw);
-  const base = params.baseUrl.endsWith('?') ? params.baseUrl : `${params.baseUrl}?`;
-  return `${base}p=${params.accessKey}|${versao}|${params.ambiente}|${cscId}|${hash}`;
+  const csc = String(params.cscToken || '').trim();
+  const seq = `${params.accessKey}|${versao}|${params.ambiente}|${cscId}`;
+  // Importante: CSC concatenado direto (sem "|") — rejeição 464 se houver pipe
+  const hash = sha1Hex(`${seq}${csc}`);
+  let urlBase = params.baseUrl.trim();
+  if (urlBase.includes('?p=')) {
+    /* já no formato correto */
+  } else if (urlBase.endsWith('?')) {
+    urlBase = `${urlBase}p=`;
+  } else if (urlBase.includes('?')) {
+    urlBase = `${urlBase}&p=`;
+  } else {
+    urlBase = `${urlBase}?p=`;
+  }
+  return `${urlBase}${seq}|${hash}`;
 }
 
 /** Grupo obrigatório da NFC-e (mod 65): qrCode + urlChave. */
