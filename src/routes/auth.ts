@@ -19,11 +19,27 @@ authRoutes.post('/login', async (c) => {
   if (!email || !password) {
     return c.json({ error: 'Email and password are required' }, 400);
   }
-  const result = await loginWithPassword(email, password);
-  if (!result.success) {
-    return c.json({ error: result.error || 'Invalid email or password' }, 401);
+  try {
+    const result = await loginWithPassword(email, password);
+    if (!result.success) {
+      return c.json({ error: result.error || 'Invalid email or password' }, 401);
+    }
+    return c.json({ user: result.user, token: result.token });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[auth/login]', message);
+    if (/timeout|ECONNREFUSED|ENOTFOUND|ECONNRESET|Connection terminated|connect/i.test(message)) {
+      return c.json(
+        {
+          error:
+            'Banco de dados inacessível a partir da API (Railway → EasyPanel). Verifique DATABASE_URL e o firewall do Postgres.',
+          detail: message,
+        },
+        503,
+      );
+    }
+    return c.json({ error: 'Erro interno no login', detail: message }, 500);
   }
-  return c.json({ user: result.user, token: result.token });
 });
 
 authRoutes.post('/init', async (c) => {
