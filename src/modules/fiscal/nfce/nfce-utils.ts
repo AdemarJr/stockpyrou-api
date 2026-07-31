@@ -58,16 +58,18 @@ export function buildAccessKey(params: {
   return key43 + accessKeyCheckDigit(key43);
 }
 
-export function formatNFeDate(d: Date): string {
-  const offset = -3; // America/Manaus approx for AM; ISO with offset
-  const local = new Date(d.getTime() + offset * 3600 * 1000);
+/** dhEmi com offset de Manaus (UTC-4, sem horário de verão). */
+export function formatNFeDate(d: Date, offsetHours = -4): string {
+  const local = new Date(d.getTime() + offsetHours * 3600 * 1000);
   const y = local.getUTCFullYear();
   const m = padLeft(local.getUTCMonth() + 1, 2);
   const day = padLeft(local.getUTCDate(), 2);
   const h = padLeft(local.getUTCHours(), 2);
   const min = padLeft(local.getUTCMinutes(), 2);
   const s = padLeft(local.getUTCSeconds(), 2);
-  return `${y}-${m}-${day}T${h}:${min}:${s}-03:00`;
+  const sign = offsetHours >= 0 ? '+' : '-';
+  const abs = padLeft(Math.abs(offsetHours), 2);
+  return `${y}-${m}-${day}T${h}:${min}:${s}${sign}${abs}:00`;
 }
 
 export function money(n: number): string {

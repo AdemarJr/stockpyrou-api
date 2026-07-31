@@ -355,7 +355,7 @@ export async function createAndAuthorizeFromSale(params: {
   for (let i = 0; i < items.length; i++) {
     const it = items[i];
     const productId = it.productId || it.product_id || it.id;
-    let ncm = '00000000';
+    let ncm = '21069090';
     let cfop = '5102';
     let csosn = config.crt === 1 || config.crt === 2 ? '102' : null;
     let origem = 0;
@@ -368,7 +368,10 @@ export async function createAndAuthorizeFromSale(params: {
       );
       const p = pRows[0] as Record<string, unknown> | undefined;
       if (p) {
-        if (p.ncm) ncm = onlyDigits(String(p.ncm));
+        if (p.ncm) {
+          const digits = onlyDigits(String(p.ncm));
+          if (digits && !/^0+$/.test(digits)) ncm = digits;
+        }
         if (p.cfop) cfop = onlyDigits(String(p.cfop));
         if (p.csosn) csosn = String(p.csosn);
         if (p.origem != null) origem = Number(p.origem) || 0;
@@ -376,11 +379,11 @@ export async function createAndAuthorizeFromSale(params: {
       }
     }
     const qty = Number(it.quantity) || 1;
-    const price = Number(it.price) || 0;
+    const price = Number(it.price ?? it.unitPrice ?? it.unit_price) || 0;
     builtItems.push({
       itemNumber: i + 1,
       description: String(it.name || `Item ${i + 1}`),
-      ncm: ncm || '00000000',
+      ncm: ncm || '21069090',
       cfop: cfop || '5102',
       csosn,
       cst: null as string | null,

@@ -74,7 +74,9 @@ export function buildNfceXml(input: NfceBuildInput): string {
         ? 'NOTA FISCAL EMITIDA EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL'
         : escapeXml(it.description).slice(0, 120);
       const csosn = onlyDigits(it.csosn || '102').padStart(3, '0').slice(0, 3);
-      const ncm = onlyDigits(it.ncm).padStart(8, '0').slice(0, 8) || '21069090';
+      const ncmRaw = onlyDigits(it.ncm).padStart(8, '0').slice(0, 8);
+      // 00000000 falha em várias SEFAZ; fallback genérico de alimentos
+      const ncm = !ncmRaw || /^0+$/.test(ncmRaw) ? '21069090' : ncmRaw;
       const cfop = onlyDigits(it.cfop).padStart(4, '0').slice(0, 4) || '5102';
       const unidade = nfeUnit(it.unidade);
       const q = qty(it.quantity);
@@ -107,6 +109,8 @@ export function buildNfceXml(input: NfceBuildInput): string {
         `<PIS><PISNT><CST>07</CST></PISNT></PIS>` +
         `<COFINS><COFINSNT><CST>07</CST></COFINSNT></COFINS>` +
         `</imposto>` +
+        // NT 2025.002 — valor do item (participação no total)
+        `<vItem>${vProd}</vItem>` +
         `</det>`
       );
     })
@@ -173,17 +177,21 @@ export function buildNfceXml(input: NfceBuildInput): string {
     `<CRT>${[1, 2, 3].includes(Number(input.emit.crt)) ? Number(input.emit.crt) : 1}</CRT>` +
     `</emit>`;
 
+  const vNF = money(input.total);
   const total =
     `<total><ICMSTot>` +
     `<vBC>0.00</vBC><vICMS>0.00</vICMS><vICMSDeson>0.00</vICMSDeson>` +
     `<vFCP>0.00</vFCP><vBCST>0.00</vBCST><vST>0.00</vST><vFCPST>0.00</vFCPST>` +
     `<vFCPSTRet>0.00</vFCPSTRet>` +
-    `<vProd>${money(input.total)}</vProd>` +
+    `<vProd>${vNF}</vProd>` +
     `<vFrete>0.00</vFrete><vSeg>0.00</vSeg><vDesc>0.00</vDesc>` +
     `<vII>0.00</vII><vIPI>0.00</vIPI><vIPIDevol>0.00</vIPIDevol>` +
     `<vPIS>0.00</vPIS><vCOFINS>0.00</vCOFINS><vOutro>0.00</vOutro>` +
-    `<vNF>${money(input.total)}</vNF>` +
-    `</ICMSTot></total>`;
+    `<vNF>${vNF}</vNF>` +
+    `</ICMSTot>` +
+    // NT 2025.002 — total com IBS/CBS/IS (em 2026, igual a vNF quando IBS/CBS=0)
+    `<vNFTot>${vNF}</vNFTot>` +
+    `</total>`;
 
   const pag =
     `<pag><detPag>` +
@@ -193,7 +201,7 @@ export function buildNfceXml(input: NfceBuildInput): string {
     `</detPag></pag>`;
 
   const infNFe =
-    `<infNFe Id="${infId}" versao="4.00">` +
+    `<infNFe versao="4.00" Id="${infId}">` +
     ide +
     emit +
     destBlock +
@@ -213,6 +221,18 @@ export function buildNfceXml(input: NfceBuildInput): string {
  * QR Code NFC-e (versão 2) — URL + hash CSC.
  * cHashQRCode = SHA-1(chave|versao|tpAmb|cscId|cscToken) hex upper
  */
+/**
+ * cIdToken no QR Code v2 — XSD exige `(0|[1-9][0-9]{0,5})` (sem zeros à esquerda).
+ * Ex.: CSC cadastrado como "000001" deve ir como "1" na URL e no hash.
+ */
+export function formatCscIdForQr(cscId: string): string {
+  const digits = onlyDigits(cscId);
+  if (!digits) return '0';
+  const n = Number(digits);
+  if (!Number.isFinite(n) || n < 0) return '0';
+  return String(Math.trunc(n)).slice(0, 6);
+}
+
 export function buildQrCodeUrl(params: {
   accessKey: string;
   ambiente: '1' | '2';
@@ -221,7 +241,7 @@ export function buildQrCodeUrl(params: {
   baseUrl: string;
 }): string {
   const versao = '2';
-  const cscId = onlyDigits(params.cscId).padStart(6, '0');
+  const cscId = formatCscIdForQr(params.cscId);
   const raw = `${params.accessKey}|${versao}|${params.ambiente}|${cscId}|${params.cscToken}`;
   const hash = sha1Hex(raw);
   const base = params.baseUrl.endsWith('?') ? params.baseUrl : `${params.baseUrl}?`;
@@ -230,9 +250,10 @@ export function buildQrCodeUrl(params: {
 
 /** Grupo obrigatório da NFC-e (mod 65): qrCode + urlChave. */
 export function buildInfNFeSupl(qrCodeUrl: string, urlChave: string): string {
+  // Sem CDATA: conteúdo escapado; evita rejeição 215 em validadores estritos
   return (
     `<infNFeSupl>` +
-    `<qrCode><![CDATA[${qrCodeUrl}]]></qrCode>` +
+    `<qrCode>${escapeXml(qrCodeUrl)}</qrCode>` +
     `<urlChave>${escapeXml(urlChave)}</urlChave>` +
     `</infNFeSupl>`
   );
