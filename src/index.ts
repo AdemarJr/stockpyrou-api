@@ -56,6 +56,8 @@ app.use(
       'X-Company-Id',
       'X-ZIG-TOKEN',
       'X-ZIG-CRON-SECRET',
+      // Baixa ZIG (preview → confirm) envia este header no POST /zig/confirm
+      'X-Zig-Confirm-Source',
     ],
     exposeHeaders: ['Content-Length'],
     maxAge: 86400,
