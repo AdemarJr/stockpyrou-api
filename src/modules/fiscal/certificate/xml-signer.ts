@@ -8,7 +8,10 @@ import { query } from '../../../db/pool.js';
 
 export interface LoadedCertificate {
   privateKeyPem: string;
+  /** Leaf PEM (assinatura XML). */
   certificatePem: string;
+  /** Leaf + intermediárias concatenadas (mTLS SEFAZ). */
+  certificateChainPem: string;
   privateKey: forge.pki.PrivateKey;
   certificate: forge.pki.Certificate;
   subjectCn: string;
@@ -32,9 +35,14 @@ function pfxToAsn1(pfxBuf: Buffer) {
   return forge.asn1.fromDer(pfxBuf.toString('latin1'));
 }
 
+function certPemListFromForge(certs: forge.pki.Certificate[]): string {
+  return certs.map((c) => forge.pki.certificateToPem(c)).join('');
+}
+
 function extractFromP12(p12: forge.pkcs12.Pkcs12Pfx): {
   privateKey: forge.pki.PrivateKey;
   certificate: forge.pki.Certificate;
+  chain: forge.pki.Certificate[];
 } {
   const certBags =
     p12.getBags({ bagType: forge.pki.oids.certBag })[forge.pki.oids.certBag] || [];
@@ -54,27 +62,48 @@ function extractFromP12(p12: forge.pkcs12.Pkcs12Pfx): {
     }
   }
 
-  let certificate: forge.pki.Certificate | null = null;
+  const allCerts: forge.pki.Certificate[] = [];
   for (const bag of certBags) {
-    if (!bag.cert) continue;
-    const cert = bag.cert as forge.pki.Certificate;
-    // Prefer leaf (not CA): has digitalSignature / nonRepudiation typically
-    if (!certificate) certificate = cert;
-    try {
-      const ku = cert.getExtension('keyUsage') as { digitalSignature?: boolean } | null;
-      if (ku?.digitalSignature) {
-        certificate = cert;
-        break;
+    if (bag.cert) allCerts.push(bag.cert as forge.pki.Certificate);
+  }
+
+  let certificate: forge.pki.Certificate | null = null;
+  const priv = privateKey as forge.pki.rsa.PrivateKey | null;
+  if (priv?.n) {
+    for (const cert of allCerts) {
+      const pub = cert.publicKey as forge.pki.rsa.PublicKey;
+      try {
+        if (pub?.n && pub.n.compareTo(priv.n) === 0) {
+          certificate = cert;
+          break;
+        }
+      } catch {
+        /* próximo */
       }
-    } catch {
-      /* ignore */
+    }
+  }
+  if (!certificate) {
+    for (const cert of allCerts) {
+      if (!certificate) certificate = cert;
+      try {
+        const ku = cert.getExtension('keyUsage') as { digitalSignature?: boolean } | null;
+        if (ku?.digitalSignature) {
+          certificate = cert;
+          break;
+        }
+      } catch {
+        /* ignore */
+      }
     }
   }
 
   if (!privateKey || !certificate) {
     throw new Error('Não foi possível extrair chave/certificado do A1');
   }
-  return { privateKey, certificate };
+
+  // Leaf primeiro, demais (intermediárias) em seguida
+  const chain = [certificate, ...allCerts.filter((c) => c !== certificate)];
+  return { privateKey, certificate, chain };
 }
 
 function loadWithForge(pfxBuf: Buffer, password: string) {
@@ -92,6 +121,7 @@ function loadWithOpenssl(pfxBuf: Buffer, password: string): {
   certificate: forge.pki.Certificate;
   privateKeyPem: string;
   certificatePem: string;
+  certificateChainPem: string;
 } {
   const dir = mkdtempSync(join(tmpdir(), 'stockpyrou-a1-'));
   const pfxPath = join(dir, 'cert.pfx');
@@ -170,11 +200,19 @@ function loadWithOpenssl(pfxBuf: Buffer, password: string): {
       }
     }
 
+    // Leaf primeiro na cadeia TLS
+    const leafPem = forge.pki.certificateToPem(certificate);
+    const others = certMatches
+      .map((m) => m[0])
+      .filter((pem) => pem !== leafPem);
+    const certificateChainPem = [leafPem, ...others].join('');
+
     return {
       privateKey,
       certificate,
       privateKeyPem: forge.pki.privateKeyToPem(privateKey),
-      certificatePem: forge.pki.certificateToPem(certificate),
+      certificatePem: leafPem,
+      certificateChainPem,
     };
   } finally {
     try {
@@ -190,6 +228,7 @@ export function parsePfx(pfxBuf: Buffer, password: string): {
   certificate: forge.pki.Certificate;
   privateKeyPem: string;
   certificatePem: string;
+  certificateChainPem: string;
   subjectCn: string;
 } {
   if (!password) throw new Error('Senha do certificado é obrigatória');
@@ -199,6 +238,7 @@ export function parsePfx(pfxBuf: Buffer, password: string): {
   let certificate: forge.pki.Certificate;
   let privateKeyPem: string;
   let certificatePem: string;
+  let certificateChainPem: string;
 
   try {
     const extracted = loadWithForge(pfxBuf, password);
@@ -206,6 +246,7 @@ export function parsePfx(pfxBuf: Buffer, password: string): {
     certificate = extracted.certificate;
     privateKeyPem = forge.pki.privateKeyToPem(privateKey);
     certificatePem = forge.pki.certificateToPem(certificate);
+    certificateChainPem = certPemListFromForge(extracted.chain);
   } catch (forgeErr) {
     const forgeMsg = forgeErr instanceof Error ? forgeErr.message : String(forgeErr);
     try {
@@ -214,6 +255,7 @@ export function parsePfx(pfxBuf: Buffer, password: string): {
       certificate = extracted.certificate;
       privateKeyPem = extracted.privateKeyPem;
       certificatePem = extracted.certificatePem;
+      certificateChainPem = extracted.certificateChainPem;
     } catch (opensslErr) {
       const opensslMsg = opensslErr instanceof Error ? opensslErr.message : String(opensslErr);
       throw new Error(
@@ -227,7 +269,14 @@ export function parsePfx(pfxBuf: Buffer, password: string): {
     certificate.subject.getField('O')?.value ||
     'Certificado A1';
 
-  return { privateKey, certificate, privateKeyPem, certificatePem, subjectCn };
+  return {
+    privateKey,
+    certificate,
+    privateKeyPem,
+    certificatePem,
+    certificateChainPem: certificateChainPem || certificatePem,
+    subjectCn,
+  };
 }
 
 export async function loadCompanyCertificate(companyId: string): Promise<LoadedCertificate> {
@@ -252,6 +301,7 @@ export async function loadCompanyCertificate(companyId: string): Promise<LoadedC
   return {
     privateKeyPem: parsed.privateKeyPem,
     certificatePem: parsed.certificatePem,
+    certificateChainPem: parsed.certificateChainPem,
     privateKey: parsed.privateKey,
     certificate: parsed.certificate,
     subjectCn: row.subject_cn || parsed.subjectCn,
@@ -337,19 +387,22 @@ export function signXmlEnveloped(
 
 /**
  * Credenciais TLS para mTLS com a SEFAZ.
- * Usa PEM (key+cert) em vez do PFX bruto — OpenSSL 3 do Node rejeita muitos A1
+ * Usa PEM (key + cadeia) em vez do PFX bruto — OpenSSL 3 do Node rejeita muitos A1
  * brasileiros com "Unsupported PKCS12 PFX data" (RC2/legado).
  */
 export async function getTlsCredentials(
   companyId: string,
 ): Promise<{ key: string; cert: string }> {
-  const cert = await loadCompanyCertificate(companyId);
-  return { key: cert.privateKeyPem, cert: cert.certificatePem };
+  const loaded = await loadCompanyCertificate(companyId);
+  return {
+    key: loaded.privateKeyPem,
+    cert: loaded.certificateChainPem || loaded.certificatePem,
+  };
 }
 
 /** @deprecated Prefira getTlsCredentials — PFX legado falha no Node/OpenSSL 3. */
 export async function getPfxBufferForTls(
   companyId: string,
-): Promise<{ pfx: Buffer; passphrase: string } | { key: string; cert: string }> {
+): Promise<{ key: string; cert: string }> {
   return getTlsCredentials(companyId);
 }
