@@ -83,6 +83,10 @@ async function postSoap(params: {
   });
 }
 
+function asRecord(v: unknown): Record<string, unknown> | null {
+  return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+}
+
 function extractDeep(obj: unknown, keys: string[]): unknown {
   if (!obj || typeof obj !== 'object') return undefined;
   const rec = obj as Record<string, unknown>;
@@ -96,28 +100,93 @@ function extractDeep(obj: unknown, keys: string[]): unknown {
   return undefined;
 }
 
+/** Localiza o bloco infProt (status da NFC-e), não o cStat do lote. */
+function extractInfProt(obj: unknown): Record<string, unknown> | null {
+  if (!obj || typeof obj !== 'object') return null;
+  const rec = obj as Record<string, unknown>;
+  if ('infProt' in rec) {
+    const inf = rec.infProt;
+    if (Array.isArray(inf)) {
+      const first = asRecord(inf[0]);
+      if (first) return first;
+    }
+    const single = asRecord(inf);
+    if (single) return single;
+  }
+  for (const v of Object.values(rec)) {
+    const found = extractInfProt(v);
+    if (found) return found;
+  }
+  return null;
+}
+
+function tagText(rawXml: string, tag: string): string | undefined {
+  const re = new RegExp(`<${tag}[^>]*>([^<]*)</${tag}>`, 'i');
+  const m = rawXml.match(re);
+  return m?.[1]?.trim() || undefined;
+}
+
+/**
+ * Normaliza retorno de autorização/consulta.
+ * Importante: em retEnviNFe síncrono, cStat 104 = "Lote processado" (lote).
+ * O status da nota está em protNFe/infProt (100 = autorizada).
+ */
 export function parseAuthorizationResponse(rawXml: string): SefazNormalizedResponse {
   const parsed = parser.parse(rawXml);
-  const cStat = String(extractDeep(parsed, ['cStat']) ?? '');
-  const xMotivo = String(extractDeep(parsed, ['xMotivo']) ?? '');
-  const nProt = extractDeep(parsed, ['nProt']);
-  const nRec = extractDeep(parsed, ['nRec']);
-  const chNFe = extractDeep(parsed, ['chNFe']);
-  const dhRecbto = extractDeep(parsed, ['dhRecbto']);
-
-  // Extrai protNFe bruto se houver
   const protMatch = rawXml.match(/<protNFe[\s\S]*?<\/protNFe>/i);
+  const protXml = protMatch?.[0];
+  const infProt = extractInfProt(parsed);
+
+  const loteStat = String(extractDeep(parsed, ['cStat']) ?? '');
+  const loteMotivo = String(extractDeep(parsed, ['xMotivo']) ?? '');
+
+  // Preferência: status da nota (infProt). Fallback: regex no XML do protocolo.
+  let cStat =
+    (infProt?.cStat != null ? String(infProt.cStat) : '') ||
+    (protXml ? tagText(protXml, 'cStat') : undefined) ||
+    '';
+  let xMotivo =
+    (infProt?.xMotivo != null ? String(infProt.xMotivo) : '') ||
+    (protXml ? tagText(protXml, 'xMotivo') : undefined) ||
+    '';
+
+  // Sem protNFe: usa status do lote (ex.: 103 recebimento assíncrono, rejeição de lote)
+  if (!cStat) {
+    cStat = loteStat;
+    xMotivo = loteMotivo;
+  }
+
+  // 104 no lote sem conseguir ler infProt — não tratar como rejeição da nota
+  if ((!infProt && !protXml) && (cStat === '104' || cStat === '103')) {
+    xMotivo = xMotivo || (cStat === '104' ? 'Lote processado' : 'Lote recebido');
+  }
+
+  const nProt =
+    infProt?.nProt ??
+    (protXml ? tagText(protXml, 'nProt') : undefined) ??
+    extractDeep(parsed, ['nProt']);
+  const chNFe =
+    infProt?.chNFe ??
+    (protXml ? tagText(protXml, 'chNFe') : undefined) ??
+    extractDeep(parsed, ['chNFe']);
+  const dhRecbto =
+    infProt?.dhRecbto ??
+    (protXml ? tagText(protXml, 'dhRecbto') : undefined) ??
+    extractDeep(parsed, ['dhRecbto']);
+  const nRec = extractDeep(parsed, ['nRec']);
+
+  const success = cStat === '100' || cStat === '150';
 
   return {
-    success: cStat === '100' || cStat === '150',
+    success,
     statusCode: cStat,
-    statusMessage: xMotivo,
+    statusMessage: xMotivo || (success ? 'Autorizado' : loteMotivo),
     accessKey: chNFe != null ? String(chNFe) : undefined,
     protocol: nProt != null ? String(nProt) : undefined,
     receipt: nRec != null ? String(nRec) : undefined,
     authorizationDate: dhRecbto != null ? String(dhRecbto) : undefined,
     rawXml,
-    protNFeXml: protMatch?.[0],
+    protNFeXml: protXml,
   };
 }
 
