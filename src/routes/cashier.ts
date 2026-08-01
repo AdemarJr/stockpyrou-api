@@ -147,8 +147,12 @@ cashier.post('/sale', requireAuth, async (c) => {
   if (!register) return c.json({ error: 'Caixa não encontrado' }, 404);
   if (register.status !== 'open') return c.json({ error: 'Caixa não está aberto' }, 400);
 
-  const clientReq =
+  // Aceita só UUID — evita IDs frágeis e garante índice único de idempotência.
+  const uuidRe =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  const clientReqRaw =
     typeof clientRequestId === 'string' && clientRequestId.trim() ? clientRequestId.trim() : null;
+  const clientReq = clientReqRaw && uuidRe.test(clientReqRaw) ? clientReqRaw : null;
 
   const detailsObj =
     paymentDetails && typeof paymentDetails === 'object'
@@ -184,6 +188,45 @@ cashier.post('/sale', requireAuth, async (c) => {
             'Informe o cliente com nome e CPF/CNPJ (obrigatório para fiado/boleto e NFC-e)',
         },
         400,
+      );
+    }
+  }
+
+  const mapSaleResponse = (
+    row: Record<string, unknown>,
+    balance: number,
+    opts?: { idempotentReplay?: boolean },
+  ) => {
+    const sale = {
+      id: row.id,
+      items: row.items,
+      total: parseFloat(String(row.total)),
+      paymentMethod: row.payment_method,
+      paymentDetails: row.payment_details,
+      emitNfce: !!(row.emit_nfce ?? emitNfce),
+      timestamp: row.timestamp,
+      cashierId: row.cashier_id,
+      cashierName: row.cashier_name,
+    };
+    return c.json({
+      success: true,
+      sale,
+      idempotentReplay: !!opts?.idempotentReplay,
+      register: { ...mapRegister(register), currentBalance: balance },
+    });
+  };
+
+  // Replay idempotente: não reaplicar saldo / receivable / ledger
+  if (clientReq) {
+    const { rows: existingEarly } = await query(
+      'SELECT * FROM sales WHERE company_id = $1 AND client_request_id = $2 LIMIT 1',
+      [companyId, clientReq],
+    );
+    if (existingEarly[0]) {
+      return mapSaleResponse(
+        existingEarly[0] as Record<string, unknown>,
+        parseFloat(String(register.current_balance)) || 0,
+        { idempotentReplay: true },
       );
     }
   }
@@ -237,10 +280,13 @@ cashier.post('/sale', requireAuth, async (c) => {
             [companyId, clientReq],
           );
           if (!existing[0]) return c.json({ error: 'Erro ao registrar venda: ' + msg2 }, 500);
-          newSale = existing[0] as Record<string, unknown>;
-        } else {
-          return c.json({ error: 'Erro ao registrar venda: ' + msg2 }, 500);
+          return mapSaleResponse(
+            existing[0] as Record<string, unknown>,
+            parseFloat(String(register.current_balance)) || 0,
+            { idempotentReplay: true },
+          );
         }
+        return c.json({ error: 'Erro ao registrar venda: ' + msg2 }, 500);
       }
     } else if (clientReq && /duplicate key|unique constraint|client_request_id/i.test(msg)) {
       const { rows: existing } = await query(
@@ -248,7 +294,11 @@ cashier.post('/sale', requireAuth, async (c) => {
         [companyId, clientReq],
       );
       if (!existing[0]) return c.json({ error: 'Erro ao registrar venda: ' + msg }, 500);
-      newSale = existing[0] as Record<string, unknown>;
+      return mapSaleResponse(
+        existing[0] as Record<string, unknown>,
+        parseFloat(String(register.current_balance)) || 0,
+        { idempotentReplay: true },
+      );
     } else {
       return c.json({ error: 'Erro ao registrar venda: ' + msg }, 500);
     }
@@ -332,23 +382,7 @@ cashier.post('/sale', requireAuth, async (c) => {
     console.error('[cashier/sale] ledger:', err);
   }
 
-  const sale = {
-    id: newSale.id,
-    items: newSale.items,
-    total: parseFloat(String(newSale.total)),
-    paymentMethod: newSale.payment_method,
-    paymentDetails: newSale.payment_details,
-    emitNfce: !!(newSale.emit_nfce ?? emitNfce),
-    timestamp: newSale.timestamp,
-    cashierId: newSale.cashier_id,
-    cashierName: newSale.cashier_name,
-  };
-
-  return c.json({
-    success: true,
-    sale,
-    register: { ...mapRegister(register), currentBalance: newBalance },
-  });
+  return mapSaleResponse(newSale, newBalance);
 });
 
 cashier.post('/withdrawal', requireAuth, async (c) => {

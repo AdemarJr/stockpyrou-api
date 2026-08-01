@@ -69,7 +69,7 @@ app.get('/api/health', (c) => {
   // Liveness para Railway: não depende do banco (senão o deploy falha com 503).
   return c.json({
     status: 'ok',
-    version: '0.2.22',
+    version: '0.2.23',
     routes: ['customers', 'fiscal', 'nfce', 'inbound-dfe', 'receivables'],
   });
 });
@@ -77,13 +77,13 @@ app.get('/api/health', (c) => {
 app.get('/api/ready', async (c) => {
   const ping = await pingDatabase(Number(process.env.PG_CONNECTION_TIMEOUT_MS || 8000));
   if (ping.ok) {
-    return c.json({ status: 'ok', database: 'connected', version: '0.2.22' });
+    return c.json({ status: 'ok', database: 'connected', version: '0.2.23' });
   }
   return c.json(
     {
       status: 'degraded',
       database: 'disconnected',
-      version: '0.2.22',
+      version: '0.2.23',
       error: ping.error,
       hint:
         'Railway não alcançou o Postgres. Confira DATABASE_URL e o firewall/rede do EasyPanel (porta 5432).',
