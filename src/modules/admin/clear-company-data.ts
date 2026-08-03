@@ -155,13 +155,15 @@ export async function clearCompanyData(
     }
 
     // --- Custos / despesas ---
+    // FK: financial_movements.operational_expense_id → operational_expenses
+    // Apagar ledger (e pagamentos) ANTES das despesas.
     if (options.costs) {
+      await run('financialMovements', `DELETE FROM financial_movements WHERE company_id = $1`);
       await run(
         'expensePayments',
         `DELETE FROM operational_expense_payments WHERE company_id = $1`,
       );
       await run('expenses', `DELETE FROM operational_expenses WHERE company_id = $1`);
-      await run('financialMovements', `DELETE FROM financial_movements WHERE company_id = $1`);
       // Não apaga cost_centers / expense_types (cadastro estrutural)
     }
 
