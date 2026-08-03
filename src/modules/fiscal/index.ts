@@ -24,6 +24,7 @@ import {
   ignoreInboundNfe,
   listInboundNfe,
   markInboundImported,
+  resetInboundNsu,
   resolveInboundSupplier,
   syncInboundNfe,
 } from './inbound/inbound.service.js';
@@ -49,6 +50,7 @@ export {
   resolveInboundSupplier,
   markInboundImported,
   ignoreInboundNfe,
+  resetInboundNsu,
 };
 
 export type { UpsertFiscalConfigInput, FiscalEnvironment };

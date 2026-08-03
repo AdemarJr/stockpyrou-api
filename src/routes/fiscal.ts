@@ -22,6 +22,7 @@ import {
   resolveInboundSupplier,
   markInboundImported,
   ignoreInboundNfe,
+  resetInboundNsu,
   type FiscalEnvironment,
 } from '../modules/fiscal/index.js';
 
@@ -101,8 +102,12 @@ fiscal.put('/config', async (c) => {
     telefone: body.telefone ?? body.phone ?? undefined,
     email: body.email ?? undefined,
     logoUrl: body.logoUrl ?? body.logo_url ?? undefined,
-    crt: body.crt != null ? Number(body.crt) : 1,
-    ambiente: (body.ambiente || 'homologation') as FiscalEnvironment,
+    crt: body.crt != null ? Number(body.crt) : undefined,
+    // Omitido = mantém o ambiente atual (homologação ou produção)
+    ambiente:
+      body.ambiente != null
+        ? (body.ambiente as FiscalEnvironment)
+        : undefined,
     serieNfce: body.serieNfce != null ? Number(body.serieNfce) : undefined,
     numeroNfce: body.numeroNfce != null ? Number(body.numeroNfce) : undefined,
     cscId: body.cscId ?? body.csc_id ?? undefined,
@@ -234,9 +239,20 @@ fiscal.post('/inbound/sync', async (c) => {
         503,
       );
     }
-    if (/certificado|CNPJ|Configure/i.test(message)) {
+    if (/certificado|CNPJ|Configure|SEFAZ|homolog/i.test(message)) {
       return c.json({ error: message }, 400);
     }
+    return c.json({ error: message }, 500);
+  }
+});
+
+fiscal.post('/inbound/reset-nsu', async (c) => {
+  const companyId = c.get('companyId');
+  try {
+    const result = await resetInboundNsu(companyId);
+    return c.json({ success: true, ...result });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
     return c.json({ error: message }, 500);
   }
 });

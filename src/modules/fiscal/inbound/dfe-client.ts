@@ -75,6 +75,7 @@ async function postSoap(params: {
         });
       },
     );
+    req.setTimeout(timeout, () => req.destroy(new Error('Timeout SEFAZ DF-e')));
     req.on('timeout', () => req.destroy(new Error('Timeout SEFAZ DF-e')));
     req.on('error', reject);
     req.write(payload);
@@ -119,7 +120,15 @@ export interface DfeDistResult {
 function decodeDocZip(docZip: Record<string, unknown>): DfeDocument | null {
   const nsu = String(docZip['@_NSU'] ?? docZip.NSU ?? '');
   const schema = String(docZip['@_schema'] ?? docZip.schema ?? '');
-  const b64 = String(docZip['#text'] ?? docZip.text ?? '').trim();
+  let b64 = String(docZip['#text'] ?? docZip.text ?? '').trim();
+  if (!b64 || b64.length < 8) {
+    for (const v of Object.values(docZip)) {
+      if (typeof v === 'string' && v.length > 40 && !v.includes('<') && !v.startsWith('http')) {
+        b64 = v.trim();
+        break;
+      }
+    }
+  }
   if (!b64 || b64.length < 8) return null;
   try {
     const compressed = Buffer.from(b64, 'base64');
@@ -132,12 +141,26 @@ function decodeDocZip(docZip: Record<string, unknown>): DfeDocument | null {
 
 function parseDistResponse(rawXml: string, durationMs: number): DfeDistResult {
   const parsed = parser.parse(rawXml);
-  const cStat = String(extractDeep(parsed, ['cStat']) ?? '');
-  const xMotivo = String(extractDeep(parsed, ['xMotivo']) ?? '');
-  const ultNSU = String(extractDeep(parsed, ['ultNSU']) ?? '0').padStart(15, '0');
-  const maxNSU = String(extractDeep(parsed, ['maxNSU']) ?? ultNSU).padStart(15, '0');
+  // Preferir retDistDFeInt — evita pegar cStat de outro nó SOAP
+  const ret = extractDeep(parsed, ['retDistDFeInt']);
+  const root =
+    ret && typeof ret === 'object' ? (ret as Record<string, unknown>) : (parsed as Record<string, unknown>);
 
-  const lote = extractDeep(parsed, ['loteDistDFeInt']);
+  const cStat = String(
+    (root.cStat as string | undefined) ?? extractDeep(root, ['cStat']) ?? '',
+  );
+  const xMotivo = String(
+    (root.xMotivo as string | undefined) ?? extractDeep(root, ['xMotivo']) ?? '',
+  );
+  const ultNSU = String(
+    (root.ultNSU as string | undefined) ?? extractDeep(root, ['ultNSU']) ?? '0',
+  ).padStart(15, '0');
+  const maxNSU = String(
+    (root.maxNSU as string | undefined) ?? extractDeep(root, ['maxNSU']) ?? ultNSU,
+  ).padStart(15, '0');
+
+  const lote =
+    (root.loteDistDFeInt as unknown) ?? extractDeep(parsed, ['loteDistDFeInt']);
   const docsRaw = asArray(
     lote && typeof lote === 'object'
       ? (lote as Record<string, unknown>).docZip
@@ -151,15 +174,17 @@ function parseDistResponse(rawXml: string, durationMs: number): DfeDistResult {
     if (decoded) documents.push(decoded);
   }
 
-  // Fallback: regex nos docZip se o parser falhar na estrutura
-  if (documents.length === 0) {
-    const re =
-      /<docZip[^>]*NSU="(\d+)"[^>]*schema="([^"]+)"[^>]*>([^<]+)<\/docZip>/gi;
+  // Fallback: regex nos docZip (ordem de atributos NSU/schema indiferente)
+  if (documents.length === 0 && /docZip/i.test(rawXml)) {
+    const re = /<docZip\b([^>]*)>([^<]+)<\/docZip>/gi;
     let m: RegExpExecArray | null;
     while ((m = re.exec(rawXml))) {
+      const attrs = m[1] || '';
+      const nsu = /NSU="(\d+)"/i.exec(attrs)?.[1] || '';
+      const schema = /schema="([^"]+)"/i.exec(attrs)?.[1] || '';
       try {
-        const xml = gunzipSync(Buffer.from(m[3].trim(), 'base64')).toString('utf8');
-        documents.push({ nsu: m[1], schema: m[2], xml });
+        const xml = gunzipSync(Buffer.from(m[2].trim(), 'base64')).toString('utf8');
+        documents.push({ nsu, schema, xml });
       } catch {
         /* ignore */
       }
@@ -200,7 +225,18 @@ export class SefazDfeClient {
         'http://www.portalfiscal.inf.br/nfe/wsdl/NFeDistribuicaoDFe/nfeDistDFeInteresse',
       bodyInner: inner,
     });
-    return parseDistResponse(res.body, res.durationMs);
+    if (res.status < 200 || res.status >= 300) {
+      throw new Error(
+        `SEFAZ DF-e HTTP ${res.status}: ${res.body.replace(/\s+/g, ' ').slice(0, 240)}`,
+      );
+    }
+    const parsed = parseDistResponse(res.body, res.durationMs);
+    if (!parsed.cStat) {
+      throw new Error(
+        `SEFAZ DF-e: resposta sem cStat. ${res.body.replace(/\s+/g, ' ').slice(0, 240)}`,
+      );
+    }
+    return parsed;
   }
 
   async distByChave(cnpj: string, chave: string): Promise<DfeDistResult> {
@@ -222,7 +258,18 @@ export class SefazDfeClient {
         'http://www.portalfiscal.inf.br/nfe/wsdl/NFeDistribuicaoDFe/nfeDistDFeInteresse',
       bodyInner: inner,
     });
-    return parseDistResponse(res.body, res.durationMs);
+    if (res.status < 200 || res.status >= 300) {
+      throw new Error(
+        `SEFAZ DF-e HTTP ${res.status}: ${res.body.replace(/\s+/g, ' ').slice(0, 240)}`,
+      );
+    }
+    const parsed = parseDistResponse(res.body, res.durationMs);
+    if (!parsed.cStat) {
+      throw new Error(
+        `SEFAZ DF-e: resposta sem cStat. ${res.body.replace(/\s+/g, ' ').slice(0, 240)}`,
+      );
+    }
+    return parsed;
   }
 
   async sendEventAn(signedEventXml: string): Promise<{

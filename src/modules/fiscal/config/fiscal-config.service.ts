@@ -271,12 +271,24 @@ export async function saveFiscalConfig(
   const razaoSocial = String(input.razaoSocial || '').trim();
   if (!razaoSocial) throw new Error('Razão social é obrigatória');
 
-  const ambiente = normalizeFiscalEnvironment(input.ambiente);
+  // Não sobrescrever ambiente/série/número quando o cliente salva só dados da empresa
+  const ambiente =
+    input.ambiente !== undefined
+      ? normalizeFiscalEnvironment(input.ambiente)
+      : normalizeFiscalEnvironment(existing?.ambiente ?? 'homologation');
 
-  const crt = [1, 2, 3].includes(Number(input.crt)) ? Number(input.crt) : 1;
-  const serie = Math.max(1, Number(input.serieNfce) || 1);
-  const numero = Math.max(0, Number(input.numeroNfce) || 0);
-  const uf = (input.uf || 'AM').toUpperCase().slice(0, 2);
+  const crt = [1, 2, 3].includes(Number(input.crt))
+    ? Number(input.crt)
+    : Number(existing?.crt) || 1;
+  const serie =
+    input.serieNfce !== undefined
+      ? Math.max(1, Number(input.serieNfce) || 1)
+      : Math.max(1, Number(existing?.serie_nfce) || 1);
+  const numero =
+    input.numeroNfce !== undefined
+      ? Math.max(0, Number(input.numeroNfce) || 0)
+      : Math.max(0, Number(existing?.numero_nfce) || 0);
+  const uf = (input.uf || existing?.uf || 'AM').toUpperCase().slice(0, 2);
 
   let cscEncrypted = existing?.csc_token_encrypted ?? null;
   let cscPlainHint: string | null = null;
