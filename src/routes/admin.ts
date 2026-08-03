@@ -9,6 +9,7 @@ import {
 } from '../auth/permissions.js';
 import type { AppVariables } from '../middleware/auth.js';
 import { requireAuth } from '../middleware/auth.js';
+import { clearCompanyData } from '../modules/admin/clear-company-data.js';
 
 const admin = new Hono<{ Variables: AppVariables }>();
 
@@ -273,59 +274,31 @@ admin.post('/clear-data', requireAuth, async (c) => {
   };
 
   if (body.confirmationCode !== 'LIMPAR') {
-    return c.json({ error: 'Invalid confirmation code' }, 400);
+    return c.json({ error: 'Código de confirmação inválido. Digite LIMPAR.' }, 400);
   }
   const companyId = String(body.companyId || '');
   if (!companyId) return c.json({ error: 'companyId is required' }, 400);
 
-  const options = body.options || {};
-  const deletions: Record<string, number> = {};
+  const { rows: companyRows } = await query(
+    `SELECT id, name FROM companies WHERE id = $1 LIMIT 1`,
+    [companyId],
+  );
+  if (!companyRows[0]) return c.json({ error: 'Empresa não encontrada' }, 404);
 
-  const runDelete = async (label: string, sql: string, params: unknown[]) => {
-    const r = await query(sql, params);
-    deletions[label] = r.rowCount ?? 0;
-  };
-
-  if (options.priceHistory) {
-    await runDelete('priceHistory', `DELETE FROM price_history WHERE company_id = $1`, [companyId]);
+  try {
+    const result = await clearCompanyData(companyId, body.options || {});
+    console.info('[admin/clear-data]', {
+      companyId,
+      companyName: (companyRows[0] as { name?: string }).name,
+      deletions: result.deletions,
+      warnings: result.warnings,
+    });
+    return c.json(result);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[admin/clear-data]', err);
+    return c.json({ error: message }, 500);
   }
-  if (options.movements) {
-    await runDelete('movements', `DELETE FROM stock_movements WHERE company_id = $1`, [companyId]);
-  }
-  if (options.stockEntries) {
-    await runDelete('stockEntries', `DELETE FROM stock_entries WHERE company_id = $1`, [companyId]);
-  }
-  if (options.sales) {
-    await runDelete('saleItems', `DELETE FROM sale_items WHERE company_id = $1`, [companyId]);
-    await runDelete('sales', `DELETE FROM sales WHERE company_id = $1`, [companyId]);
-    await runDelete('cashMovements', `DELETE FROM cash_movements WHERE company_id = $1`, [companyId]);
-    await runDelete('cashRegisters', `DELETE FROM cash_registers WHERE company_id = $1`, [companyId]);
-  }
-  if (options.suppliers) {
-    await runDelete('suppliers', `DELETE FROM suppliers WHERE company_id = $1`, [companyId]);
-  }
-  if (options.products) {
-    await runDelete(
-      'recipeIngredients',
-      `DELETE FROM recipe_ingredients WHERE company_id = $1`,
-      [companyId],
-    );
-    await runDelete('recipes', `DELETE FROM recipes WHERE company_id = $1`, [companyId]);
-    await runDelete('products', `DELETE FROM products WHERE company_id = $1`, [companyId]);
-  }
-  if (options.stockQuantities) {
-    const r = await query(
-      `UPDATE products SET current_stock = 0, updated_at = now() WHERE company_id = $1`,
-      [companyId],
-    );
-    deletions.stockQuantities = r.rowCount ?? 0;
-  }
-
-  return c.json({
-    success: true,
-    message: 'Selected data cleared successfully',
-    deletions,
-  });
 });
 
 export default admin;
