@@ -1,9 +1,10 @@
 import { Hono } from 'hono';
 import { query } from '../db/pool.js';
 import type { AppVariables } from '../middleware/auth.js';
-import { requireAuth, requireCompany } from '../middleware/auth.js';
+import { requireAuth, requireCompany, requirePermission } from '../middleware/auth.js';
 import {
   adjustOpenCashRegister,
+  deleteLedgerForReceivable,
   ledgerReceivablePayment,
   upsertLedgerMovement,
   todayYmdLocal as ledgerTodayYmd,
@@ -12,6 +13,15 @@ import {
 const receivables = new Hono<{ Variables: AppVariables }>();
 
 receivables.use('*', requireAuth, requireCompany);
+/** Leitura liberada; mutações exigem canManageCosts */
+receivables.use('*', async (c, next) => {
+  const method = c.req.method.toUpperCase();
+  if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') {
+    await next();
+    return;
+  }
+  return requirePermission('canManageCosts')(c, next);
+});
 
 function todayYmdLocal(): string {
   const fmt = new Intl.DateTimeFormat('en-CA', {
@@ -362,6 +372,20 @@ receivables.put('/:id', async (c) => {
 receivables.delete('/:id', async (c) => {
   const companyId = c.get('companyId');
   const id = c.req.param('id');
+
+  const existing = await query(
+    `SELECT id FROM accounts_receivable WHERE id = $1 AND company_id = $2 LIMIT 1`,
+    [id, companyId],
+  );
+  if (!existing.rowCount) return c.json({ error: 'Título não encontrado' }, 404);
+
+  // Limpa ledger do título (previsto + recebimentos) antes de apagar
+  await deleteLedgerForReceivable(companyId, id);
+  await query(
+    `DELETE FROM accounts_receivable_payments WHERE company_id = $1 AND receivable_id = $2`,
+    [companyId, id],
+  );
+
   const { rowCount } = await query(
     `DELETE FROM accounts_receivable WHERE id = $1 AND company_id = $2`,
     [id, companyId],

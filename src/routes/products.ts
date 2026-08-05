@@ -2,19 +2,32 @@ import { Hono } from 'hono';
 import { query } from '../db/pool.js';
 import { mapProductRow, mapProductToDb, type ProductDto } from '../mappers/product.js';
 import type { AppVariables } from '../middleware/auth.js';
-import { requireAuth, requireCompany } from '../middleware/auth.js';
+import { requireAuth, requireCompany, requirePermission } from '../middleware/auth.js';
 
 const products = new Hono<{ Variables: AppVariables }>();
 
 products.use('*', requireAuth, requireCompany);
+products.use('*', async (c, next) => {
+  const method = c.req.method.toUpperCase();
+  if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') {
+    await next();
+    return;
+  }
+  if (method === 'DELETE') {
+    return requirePermission('canDeleteProducts')(c, next);
+  }
+  return requirePermission('canManageProducts')(c, next);
+});
 
 products.get('/', async (c) => {
   const companyId = c.get('companyId');
+  const includeInactive = c.req.query('includeInactive') === 'true';
   const { rows } = await query(
     `SELECT * FROM products
      WHERE company_id = $1
+       AND ($2::boolean OR COALESCE(status, 'active') <> 'inactive')
      ORDER BY name ASC`,
-    [companyId],
+    [companyId, includeInactive],
   );
   return c.json({ products: rows.map((r) => mapProductRow(r as Record<string, unknown>)) });
 });
@@ -154,14 +167,42 @@ products.patch('/:id/stock', async (c) => {
 products.delete('/:id', async (c) => {
   const companyId = c.get('companyId');
   const id = c.req.param('id');
-  const result = await query(
-    `DELETE FROM products WHERE id = $1 AND company_id = $2`,
-    [id, companyId],
-  );
-  if ((result.rowCount ?? 0) === 0) {
-    return c.json({ error: 'Product not found' }, 404);
+
+  // Soft-delete: evita quebrar FKs de movimentos/entradas/vendas
+  try {
+    const { rowCount } = await query(
+      `UPDATE products
+       SET status = 'inactive', updated_at = now()
+       WHERE id = $1 AND company_id = $2`,
+      [id, companyId],
+    );
+    if (!rowCount) {
+      return c.json({ error: 'Product not found' }, 404);
+    }
+    return c.json({ ok: true, softDeleted: true });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    // Fallback: tentativa de hard delete; se FK bloquear, 409
+    try {
+      const result = await query(`DELETE FROM products WHERE id = $1 AND company_id = $2`, [
+        id,
+        companyId,
+      ]);
+      if ((result.rowCount ?? 0) === 0) {
+        return c.json({ error: 'Product not found' }, 404);
+      }
+      return c.json({ ok: true });
+    } catch (err2) {
+      console.warn('[products.delete]', message, err2);
+      return c.json(
+        {
+          error:
+            'Não é possível excluir este produto porque há movimentações ou vínculos. Ele foi mantido; tente inativá-lo.',
+        },
+        409,
+      );
+    }
   }
-  return c.json({ ok: true });
 });
 
 export default products;

@@ -4,8 +4,8 @@ import { query } from '../db/pool.js';
 import { hashPassword } from '../auth/login-service.js';
 import {
   getPermissionsByRole,
-  mapAppUserRole,
-  type UserRole,
+  mapAppRoleToDb,
+  mapDbRoleToApp,
 } from '../auth/permissions.js';
 import type { AppVariables } from '../middleware/auth.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -16,17 +16,6 @@ const admin = new Hono<{ Variables: AppVariables }>();
 function requireSuperAdmin(c: { get: (k: 'auth') => AppVariables['auth'] }) {
   const auth = c.get('auth');
   return auth.role === 'superadmin';
-}
-
-function mapDbRoleToApp(role: string): UserRole {
-  return mapAppUserRole(role);
-}
-
-function mapAppRoleToDb(role: string): string {
-  if (role === 'superadmin') return 'super_admin';
-  if (role === 'gerente' || role === 'manager') return 'manager';
-  if (role === 'admin') return 'admin';
-  return 'user';
 }
 
 async function companyStatus(companyId: string, rowStatus?: unknown, isActive?: unknown): Promise<string> {

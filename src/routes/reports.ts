@@ -1,10 +1,10 @@
 import { Hono } from 'hono';
 import { query } from '../db/pool.js';
 import type { AppVariables } from '../middleware/auth.js';
-import { requireAuth, requireCompany } from '../middleware/auth.js';
+import { requireAuth, requireCompany, requirePermission } from '../middleware/auth.js';
 
 const reports = new Hono<{ Variables: AppVariables }>();
-reports.use('*', requireAuth, requireCompany);
+reports.use('*', requireAuth, requireCompany, requirePermission('canViewReports'));
 
 reports.get('/sales', async (c) => {
   const companyId = c.get('companyId');

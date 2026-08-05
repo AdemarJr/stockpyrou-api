@@ -166,6 +166,36 @@ export async function deleteLedgerBySource(companyId: string, source: string): P
   }
 }
 
+/** Remove ledger vinculado a uma despesa (previsto + pagamentos). */
+export async function deleteLedgerForExpense(
+  companyId: string,
+  expenseId: string,
+): Promise<void> {
+  await query(
+    `DELETE FROM financial_movements
+     WHERE company_id = $1
+       AND (
+         operational_expense_id = $2::uuid
+         OR source = $3
+         OR source LIKE $4
+       )`,
+    [companyId, expenseId, `expense:${expenseId}`, `expense_pay:${expenseId}:%`],
+  );
+}
+
+/** Remove ledger vinculado a um título a receber (previsto + recebimentos). */
+export async function deleteLedgerForReceivable(
+  companyId: string,
+  receivableId: string,
+): Promise<void> {
+  await query(
+    `DELETE FROM financial_movements
+     WHERE company_id = $1
+       AND (source = $2 OR source LIKE $3)`,
+    [companyId, `ar:${receivableId}`, `ar_pay:${receivableId}:%`],
+  );
+}
+
 /** Credita/debita caixa aberto (money/pix). type: deposit | withdrawal */
 export async function adjustOpenCashRegister(params: {
   companyId: string;

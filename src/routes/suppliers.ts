@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { query } from '../db/pool.js';
 import type { AppVariables } from '../middleware/auth.js';
-import { requireAuth, requireCompany } from '../middleware/auth.js';
+import { requireAuth, requireCompany, requirePermission } from '../middleware/auth.js';
 
 function mapSupplier(data: Record<string, unknown>) {
   return {
@@ -20,6 +20,14 @@ function mapSupplier(data: Record<string, unknown>) {
 
 const suppliers = new Hono<{ Variables: AppVariables }>();
 suppliers.use('*', requireAuth, requireCompany);
+suppliers.use('*', async (c, next) => {
+  const method = c.req.method.toUpperCase();
+  if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') {
+    await next();
+    return;
+  }
+  return requirePermission('canManageStock')(c, next);
+});
 
 suppliers.get('/', async (c) => {
   const companyId = c.get('companyId');
@@ -89,12 +97,56 @@ suppliers.put('/:id', async (c) => {
 
 suppliers.delete('/:id', async (c) => {
   const companyId = c.get('companyId');
-  const result = await query('DELETE FROM suppliers WHERE id = $1 AND company_id = $2', [
-    c.req.param('id'),
-    companyId,
-  ]);
-  if ((result.rowCount ?? 0) === 0) return c.json({ error: 'Not found' }, 404);
-  return c.json({ ok: true });
+  const id = c.req.param('id');
+
+  const existing = await query(
+    `SELECT id FROM suppliers WHERE id = $1 AND company_id = $2 LIMIT 1`,
+    [id, companyId],
+  );
+  if (!existing.rowCount) return c.json({ error: 'Not found' }, 404);
+
+  const deps = await query(
+    `SELECT
+       (SELECT COUNT(*)::int FROM stock_entries WHERE company_id = $1 AND supplier_id = $2) AS entries,
+       (SELECT COUNT(*)::int FROM products WHERE company_id = $1 AND supplier_id = $2) AS products,
+       (SELECT COUNT(*)::int FROM operational_expenses WHERE company_id = $1 AND supplier_id = $2) AS expenses`,
+    [companyId, id],
+  );
+  const row = deps.rows[0] as { entries: number; products: number; expenses: number };
+  const total =
+    (Number(row?.entries) || 0) + (Number(row?.products) || 0) + (Number(row?.expenses) || 0);
+  if (total > 0) {
+    return c.json(
+      {
+        error:
+          'Não é possível excluir este fornecedor: há entradas, produtos ou despesas vinculados. Remova os vínculos antes.',
+        dependencies: {
+          stockEntries: Number(row?.entries) || 0,
+          products: Number(row?.products) || 0,
+          expenses: Number(row?.expenses) || 0,
+        },
+      },
+      409,
+    );
+  }
+
+  try {
+    const result = await query('DELETE FROM suppliers WHERE id = $1 AND company_id = $2', [
+      id,
+      companyId,
+    ]);
+    if ((result.rowCount ?? 0) === 0) return c.json({ error: 'Not found' }, 404);
+    return c.json({ ok: true });
+  } catch (err) {
+    console.warn('[suppliers.delete]', err);
+    return c.json(
+      {
+        error:
+          'Não é possível excluir este fornecedor porque há registros vinculados no sistema.',
+      },
+      409,
+    );
+  }
 });
 
 export default suppliers;

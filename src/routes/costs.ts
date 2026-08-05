@@ -1,9 +1,10 @@
 import { Hono } from 'hono';
 import { query } from '../db/pool.js';
 import type { AppVariables } from '../middleware/auth.js';
-import { requireAuth, requireCompany } from '../middleware/auth.js';
+import { requireAuth, requireCompany, requirePermission } from '../middleware/auth.js';
 import {
   adjustOpenCashRegister,
+  deleteLedgerForExpense,
   ledgerExpensePayment,
   ledgerFromExpense,
 } from '../services/ledger.js';
@@ -11,6 +12,15 @@ import {
 const costs = new Hono<{ Variables: AppVariables }>();
 
 costs.use('*', requireAuth, requireCompany);
+/** Leitura liberada com auth; mutações exigem canManageCosts */
+costs.use('*', async (c, next) => {
+  const method = c.req.method.toUpperCase();
+  if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') {
+    await next();
+    return;
+  }
+  return requirePermission('canManageCosts')(c, next);
+});
 
 function todayYmdLocal(): string {
   const fmt = new Intl.DateTimeFormat('en-CA', {
@@ -497,16 +507,52 @@ costs.put('/expenses/:id', async (c) => {
 costs.delete('/expenses/group/:groupId', async (c) => {
   const companyId = c.get('companyId');
   const groupId = c.req.param('groupId');
+
+  const { rows } = await query(
+    `SELECT id FROM operational_expenses WHERE company_id = $1 AND expense_group_id = $2`,
+    [companyId, groupId],
+  );
+  if (rows.length === 0) {
+    return c.json({ error: 'Nenhuma despesa encontrada neste grupo' }, 404);
+  }
+
+  // FK: financial_movements / payments → operational_expenses (sem CASCADE)
+  for (const row of rows) {
+    const expenseId = String((row as { id: string }).id);
+    await deleteLedgerForExpense(companyId, expenseId);
+  }
   await query(
+    `DELETE FROM operational_expense_payments
+     WHERE company_id = $1
+       AND expense_id IN (
+         SELECT id FROM operational_expenses WHERE company_id = $1 AND expense_group_id = $2
+       )`,
+    [companyId, groupId],
+  );
+  const { rowCount } = await query(
     `DELETE FROM operational_expenses WHERE company_id = $1 AND expense_group_id = $2`,
     [companyId, groupId],
   );
-  return c.json({ ok: true });
+  return c.json({ ok: true, deleted: rowCount ?? 0 });
 });
 
 costs.delete('/expenses/:id', async (c) => {
   const companyId = c.get('companyId');
   const id = c.req.param('id');
+
+  const existing = await query(
+    `SELECT id FROM operational_expenses WHERE id = $1 AND company_id = $2 LIMIT 1`,
+    [id, companyId],
+  );
+  if (!existing.rowCount) return c.json({ error: 'Expense not found' }, 404);
+
+  // FK: apagar ledger e pagamentos ANTES da despesa
+  await deleteLedgerForExpense(companyId, id);
+  await query(
+    `DELETE FROM operational_expense_payments WHERE company_id = $1 AND expense_id = $2`,
+    [companyId, id],
+  );
+
   const { rowCount } = await query(
     `DELETE FROM operational_expenses WHERE id = $1 AND company_id = $2`,
     [id, companyId],

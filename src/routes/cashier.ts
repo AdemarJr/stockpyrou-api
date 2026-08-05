@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { query } from '../db/pool.js';
 import { resolveCompanyId } from '../auth/resolve-company.js';
 import type { AppVariables } from '../middleware/auth.js';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuth, requirePermission } from '../middleware/auth.js';
 import { createReceivableFromSale } from './receivables.js';
 import { ledgerFromSale } from '../services/ledger.js';
 
@@ -40,6 +40,7 @@ function mapRegister(row: Record<string, unknown>) {
 }
 
 const cashier = new Hono<{ Variables: AppVariables }>();
+cashier.use('*', requireAuth, requirePermission('canAccessCashier'));
 
 async function withProfile(c: Parameters<typeof requireAuth>[0]) {
   const auth = c.get('auth');
@@ -48,7 +49,7 @@ async function withProfile(c: Parameters<typeof requireAuth>[0]) {
   return { auth, companyId };
 }
 
-cashier.post('/open', requireAuth, async (c) => {
+cashier.post('/open', async (c) => {
   const ctx = await withProfile(c);
   if ('error' in ctx) return ctx.error;
   const { auth, companyId } = ctx;
@@ -73,7 +74,7 @@ cashier.post('/open', requireAuth, async (c) => {
   return c.json({ success: true, register: mapRegister(rows[0] as Record<string, unknown>) });
 });
 
-cashier.get('/current', requireAuth, async (c) => {
+cashier.get('/current', async (c) => {
   const ctx = await withProfile(c);
   if ('error' in ctx) return ctx.error;
   const { auth, companyId } = ctx;
@@ -132,7 +133,7 @@ cashier.get('/current', requireAuth, async (c) => {
   });
 });
 
-cashier.post('/sale', requireAuth, async (c) => {
+cashier.post('/sale', async (c) => {
   const ctx = await withProfile(c);
   if ('error' in ctx) return ctx.error;
   const { auth, companyId } = ctx;
@@ -385,7 +386,7 @@ cashier.post('/sale', requireAuth, async (c) => {
   return mapSaleResponse(newSale, newBalance);
 });
 
-cashier.post('/withdrawal', requireAuth, async (c) => {
+cashier.post('/withdrawal', async (c) => {
   const ctx = await withProfile(c);
   if ('error' in ctx) return ctx.error;
   const { auth, companyId } = ctx;
@@ -431,7 +432,7 @@ cashier.post('/withdrawal', requireAuth, async (c) => {
   });
 });
 
-cashier.post('/deposit', requireAuth, async (c) => {
+cashier.post('/deposit', async (c) => {
   const ctx = await withProfile(c);
   if ('error' in ctx) return ctx.error;
   const { auth, companyId } = ctx;
@@ -477,7 +478,7 @@ cashier.post('/deposit', requireAuth, async (c) => {
   });
 });
 
-cashier.post('/close', requireAuth, async (c) => {
+cashier.post('/close', async (c) => {
   const ctx = await withProfile(c);
   if ('error' in ctx) return ctx.error;
   const { auth, companyId } = ctx;
@@ -537,7 +538,7 @@ cashier.post('/close', requireAuth, async (c) => {
   });
 });
 
-cashier.get('/history', requireAuth, async (c) => {
+cashier.get('/history', async (c) => {
   const ctx = await withProfile(c);
   if ('error' in ctx) return ctx.error;
   const { companyId } = ctx;

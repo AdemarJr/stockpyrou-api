@@ -3,11 +3,23 @@ import { fetchAllRows } from '../db/paginate.js';
 import { query } from '../db/pool.js';
 import { mapMovementRow, mapStockEntryRow } from '../mappers/stock.js';
 import type { AppVariables } from '../middleware/auth.js';
-import { requireAuth, requireCompany } from '../middleware/auth.js';
-import { ledgerFromExpense, todayYmdLocal } from '../services/ledger.js';
+import { requireAuth, requireCompany, requirePermission } from '../middleware/auth.js';
+import {
+  deleteLedgerForExpense,
+  ledgerFromExpense,
+  todayYmdLocal,
+} from '../services/ledger.js';
 
 const stock = new Hono<{ Variables: AppVariables }>();
 stock.use('*', requireAuth, requireCompany);
+stock.use('*', async (c, next) => {
+  const method = c.req.method.toUpperCase();
+  if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') {
+    await next();
+    return;
+  }
+  return requirePermission('canManageStock')(c, next);
+});
 
 async function resolvePurchaseExpenseDefaults(companyId: string): Promise<{
   expenseTypeId: string | null;
@@ -181,9 +193,44 @@ stock.put('/entries/:id', async (c) => {
 
 stock.delete('/entries/:id', async (c) => {
   const companyId = c.get('companyId');
+  const entryId = c.req.param('id');
+
+  const existing = await query(
+    `SELECT id FROM stock_entries WHERE id = $1 AND company_id = $2 LIMIT 1`,
+    [entryId, companyId],
+  );
+  if (!existing.rowCount) return c.json({ error: 'Not found' }, 404);
+
+  // Despesas/ledger criados na entrada (FK stock_entry_id / operational_expense_id)
+  const { rows: expenseRows } = await query(
+    `SELECT id FROM operational_expenses WHERE company_id = $1 AND stock_entry_id = $2`,
+    [companyId, entryId],
+  );
+  for (const row of expenseRows) {
+    const expenseId = String((row as { id: string }).id);
+    await deleteLedgerForExpense(companyId, expenseId);
+  }
+  await query(
+    `DELETE FROM operational_expense_payments
+     WHERE company_id = $1
+       AND expense_id IN (
+         SELECT id FROM operational_expenses WHERE company_id = $1 AND stock_entry_id = $2
+       )`,
+    [companyId, entryId],
+  );
+  await query(
+    `DELETE FROM operational_expenses WHERE company_id = $1 AND stock_entry_id = $2`,
+    [companyId, entryId],
+  );
+  // Ledger órfão que só referencia a entrada
+  await query(
+    `DELETE FROM financial_movements WHERE company_id = $1 AND stock_entry_id = $2`,
+    [companyId, entryId],
+  );
+
   const result = await query(
     'DELETE FROM stock_entries WHERE id = $1 AND company_id = $2',
-    [c.req.param('id'), companyId],
+    [entryId, companyId],
   );
   if ((result.rowCount ?? 0) === 0) return c.json({ error: 'Not found' }, 404);
   return c.json({ ok: true });

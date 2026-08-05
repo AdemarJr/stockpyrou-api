@@ -1,7 +1,11 @@
 import { Hono } from 'hono';
 import { query } from '../db/pool.js';
+import {
+  getPermissionsByRole,
+  mapAppUserRole,
+} from '../auth/permissions.js';
 import type { AppVariables } from '../middleware/auth.js';
-import { requireAuth, requireCompany } from '../middleware/auth.js';
+import { requireAuth, requireCompany, requirePermission } from '../middleware/auth.js';
 
 function onlyDigits(value: string): string {
   return String(value || '').replace(/\D/g, '');
@@ -101,6 +105,29 @@ function validateCustomerInput(body: Record<string, unknown>) {
 
 const customers = new Hono<{ Variables: AppVariables }>();
 customers.use('*', requireAuth, requireCompany);
+customers.use('*', async (c, next) => {
+  const method = c.req.method.toUpperCase();
+  if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') {
+    await next();
+    return;
+  }
+  // PDV (operador) precisa criar cliente no fiado; edição/exclusão exige estoque
+  if (method === 'POST') {
+    const auth = c.get('auth');
+    const role = mapAppUserRole(String(auth.role || ''));
+    if (role === 'superadmin') {
+      await next();
+      return;
+    }
+    const perms = auth.permissions ?? getPermissionsByRole(role);
+    if (perms.canManageStock || perms.canAccessCashier) {
+      await next();
+      return;
+    }
+    return c.json({ error: 'Sem permissão para esta operação' }, 403);
+  }
+  return requirePermission('canManageStock')(c, next);
+});
 
 customers.get('/', async (c) => {
   const companyId = c.get('companyId');
