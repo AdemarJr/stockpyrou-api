@@ -17,6 +17,10 @@ import {
 } from '../auth/resolve-company.js';
 import type { AppVariables } from '../middleware/auth.js';
 import { requireAuth } from '../middleware/auth.js';
+import {
+  sendPasswordChangedEmail,
+  sendWelcomeEmail,
+} from '../services/mail/notify.js';
 
 const users = new Hono<{ Variables: AppVariables }>();
 
@@ -215,6 +219,8 @@ users.post('/', async (c) => {
     status: 'active',
   });
 
+  void sendWelcomeEmail({ to: email, fullName });
+
   return c.json({ success: true, user: mapUserRow(created) }, 201);
 });
 
@@ -404,6 +410,18 @@ users.post('/me/change-password', async (c) => {
     });
   }
 
+  const { rows: meRows } = await query(
+    `SELECT email, full_name FROM app_users WHERE id = $1 LIMIT 1`,
+    [auth.userId],
+  );
+  const me = meRows[0] as { email?: string; full_name?: string } | undefined;
+  if (me?.email) {
+    void sendPasswordChangedEmail({
+      to: String(me.email),
+      fullName: String(me.full_name || auth.fullName || ''),
+    });
+  }
+
   return c.json({ success: true, message: 'Senha alterada com sucesso' });
 });
 
@@ -421,7 +439,7 @@ users.post('/:id/reset-password', async (c) => {
   }
 
   const { rows: existingRows } = await query(
-    `SELECT id, email, role, company_id FROM app_users WHERE id = $1 LIMIT 1`,
+    `SELECT id, email, full_name, role, company_id FROM app_users WHERE id = $1 LIMIT 1`,
     [userId],
   );
   const existing = existingRows[0] as Record<string, unknown> | undefined;
@@ -456,6 +474,14 @@ users.post('/:id/reset-password', async (c) => {
       ...(kvExisting as Record<string, unknown>),
       passwordHash,
       updatedAt: new Date().toISOString(),
+    });
+  }
+
+  const targetEmail = existing.email != null ? String(existing.email) : '';
+  if (targetEmail) {
+    void sendPasswordChangedEmail({
+      to: targetEmail,
+      fullName: String(existing.full_name || ''),
     });
   }
 

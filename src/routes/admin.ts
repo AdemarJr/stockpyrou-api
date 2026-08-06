@@ -10,6 +10,7 @@ import {
 import type { AppVariables } from '../middleware/auth.js';
 import { requireAuth } from '../middleware/auth.js';
 import { clearCompanyData } from '../modules/admin/clear-company-data.js';
+import { sendWelcomeEmail } from '../services/mail/notify.js';
 
 const admin = new Hono<{ Variables: AppVariables }>();
 
@@ -213,6 +214,8 @@ admin.post('/create-user', requireAuth, async (c) => {
   };
   await kvSet(`user:${userId}`, profile as unknown as Record<string, unknown>);
   await kvSet(`user:email:${email}`, { userId });
+
+  void sendWelcomeEmail({ to: email, fullName });
 
   return c.json({
     success: true,
