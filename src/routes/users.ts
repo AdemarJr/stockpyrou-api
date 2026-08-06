@@ -10,6 +10,11 @@ import {
   mapAppUserRole,
   type UserRole,
 } from '../auth/permissions.js';
+import {
+  listUserCompanyIds,
+  resolveCompanyId,
+  userHasCompanyAccess,
+} from '../auth/resolve-company.js';
 import type { AppVariables } from '../middleware/auth.js';
 import { requireAuth } from '../middleware/auth.js';
 
@@ -18,14 +23,24 @@ const users = new Hono<{ Variables: AppVariables }>();
 users.use('*', requireAuth);
 
 function canManageUsers(auth: AppVariables['auth']): boolean {
-  return auth.role === 'superadmin' || !!auth.permissions?.canManageUsers;
+  return (
+    auth.role === 'superadmin' ||
+    mapAppUserRole(String(auth.role || '')) === 'admin' ||
+    !!auth.permissions?.canManageUsers
+  );
 }
 
-function actorCompanyId(
-  c: { req: { header: (n: string) => string | undefined }; get: (k: 'auth') => AppVariables['auth'] },
-): string {
+async function resolveActorCompany(
+  c: {
+    req: { header: (n: string) => string | undefined };
+    get: (k: 'auth') => AppVariables['auth'];
+  },
+): Promise<string> {
   const auth = c.get('auth');
-  return String(c.req.header('X-Company-Id')?.trim() || auth.companyId || '');
+  return (
+    (await resolveCompanyId(auth, c.req.header('X-Company-Id'))) ||
+    ''
+  );
 }
 
 function mapUserRow(row: Record<string, unknown>) {
@@ -72,15 +87,32 @@ users.get('/', async (c) => {
     return c.json({ error: 'Unauthorized - Admin access required' }, 401);
   }
 
-  const companyId = c.req.query('companyId');
+  const requestedCompanyId = c.req.query('companyId')?.trim();
   const params: unknown[] = [];
   let where = 'WHERE is_active = true';
-  if (companyId) {
-    params.push(companyId);
-    where += ` AND company_id = $${params.length}`;
-  } else if (auth.role !== 'superadmin' && auth.companyId) {
-    params.push(auth.companyId);
-    where += ` AND company_id = $${params.length}`;
+
+  if (auth.role === 'superadmin') {
+    if (requestedCompanyId) {
+      params.push(requestedCompanyId);
+      where += ` AND company_id = $${params.length}`;
+    }
+  } else {
+    const linked = await listUserCompanyIds(auth);
+    if (linked.length === 0) {
+      return c.json({ users: [] });
+    }
+    let scopeId = requestedCompanyId || (await resolveActorCompany(c));
+    if (scopeId) {
+      const ok = await userHasCompanyAccess(auth, scopeId);
+      if (!ok) {
+        return c.json({ error: 'Sem acesso a esta empresa' }, 403);
+      }
+      params.push(scopeId);
+      where += ` AND company_id = $${params.length}`;
+    } else {
+      params.push(linked);
+      where += ` AND company_id = ANY($${params.length}::uuid[])`;
+    }
   }
 
   const { rows } = await query(
@@ -124,14 +156,20 @@ users.post('/', async (c) => {
     return c.json({ error: 'A senha deve ter no mínimo 6 caracteres' }, 400);
   }
 
-  const actorCompany = actorCompanyId(c);
+  const actorCompany = await resolveActorCompany(c);
   if (auth.role !== 'superadmin') {
-    if (!actorCompany) {
-      return c.json({ error: 'Empresa não identificada para criar usuário' }, 400);
+    const ok = await userHasCompanyAccess(auth, companyId);
+    if (!ok) {
+      return c.json(
+        {
+          error:
+            'Sem permissão para criar usuário nesta empresa. Use apenas empresas vinculadas.',
+        },
+        403,
+      );
     }
-    if (companyId !== actorCompany) {
-      return c.json({ error: 'Sem permissão para criar usuário em outra empresa' }, 403);
-    }
+  } else if (!companyId && !actorCompany) {
+    return c.json({ error: 'Empresa não identificada para criar usuário' }, 400);
   }
 
   if (!canAssignRole(auth.role, requestedRole)) {
@@ -208,12 +246,8 @@ users.put('/:id', async (c) => {
 
   const targetCompanyId =
     existing.company_id != null ? String(existing.company_id) : null;
-  const actorCompany = actorCompanyId(c);
   if (auth.role !== 'superadmin') {
-    if (!actorCompany) {
-      return c.json({ error: 'Empresa não identificada' }, 400);
-    }
-    if (targetCompanyId && targetCompanyId !== actorCompany) {
+    if (!targetCompanyId || !(await userHasCompanyAccess(auth, targetCompanyId))) {
       return c.json({ error: 'Sem permissão para editar usuário de outra empresa' }, 403);
     }
   }
@@ -293,12 +327,9 @@ users.delete('/:id', async (c) => {
 
   const targetCompanyId =
     existing.company_id != null ? String(existing.company_id) : null;
-  const actorCompany = actorCompanyId(c);
+  const actorCompany = await resolveActorCompany(c);
   if (auth.role !== 'superadmin') {
-    if (!actorCompany) {
-      return c.json({ error: 'Empresa não identificada' }, 400);
-    }
-    if (targetCompanyId && targetCompanyId !== actorCompany) {
+    if (!targetCompanyId || !(await userHasCompanyAccess(auth, targetCompanyId))) {
       return c.json({ error: 'Sem permissão para desativar usuário de outra empresa' }, 403);
     }
   }
@@ -403,13 +434,12 @@ users.post('/:id/reset-password', async (c) => {
 
   const targetCompanyId =
     existing.company_id != null ? String(existing.company_id) : null;
-  const actorCompany = actorCompanyId(c);
   if (auth.role !== 'superadmin') {
-    if (!actorCompany) {
-      return c.json({ error: 'Empresa não identificada' }, 400);
-    }
-    if (targetCompanyId && targetCompanyId !== actorCompany) {
-      return c.json({ error: 'Sem permissão para redefinir senha de usuário de outra empresa' }, 403);
+    if (!targetCompanyId || !(await userHasCompanyAccess(auth, targetCompanyId))) {
+      return c.json(
+        { error: 'Sem permissão para redefinir senha de usuário de outra empresa' },
+        403,
+      );
     }
   }
 

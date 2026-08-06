@@ -96,24 +96,30 @@ export function getRoleRank(role: string): number {
 }
 
 /**
- * Actor pode atribuir `role` se rank(role) < rank(actor).
- * Superadmin pode atribuir qualquer perfil (incluindo outro superadmin).
+ * Actor pode atribuir `role`:
+ * - superadmin: qualquer
+ * - admin da empresa: admin e abaixo (acesso total na empresa; não cria superadmin)
+ * - demais: só ranks estritamente menores
  */
 export function canAssignRole(actorRole: string, targetRole: string): boolean {
   const actor = mapAppUserRole(actorRole);
   const target = mapAppUserRole(targetRole);
   if (actor === 'superadmin') return true;
+  if (target === 'superadmin') return false;
+  if (actor === 'admin') return getRoleRank(target) <= getRoleRank('admin');
   return getRoleRank(actor) > getRoleRank(target);
 }
 
 /**
  * Actor pode gerir o usuário-alvo (editar/desativar/reset).
- * Superadmin gerencia qualquer um; demais precisam rank estritamente maior.
+ * Admin da empresa gerencia outros admins e perfis abaixo; nunca superadmin.
  */
 export function canManageTargetUser(actorRole: string, targetRole: string): boolean {
   const actor = mapAppUserRole(actorRole);
   const target = mapAppUserRole(targetRole);
   if (actor === 'superadmin') return true;
+  if (target === 'superadmin') return false;
+  if (actor === 'admin') return getRoleRank(target) <= getRoleRank('admin');
   return getRoleRank(actor) > getRoleRank(target);
 }
 
@@ -125,7 +131,8 @@ export function assignableRolesFor(actorRole: string): UserRole[] {
 
 /**
  * Matriz de perfis:
- * - superadmin / admin: tudo (inclui configurações e usuários)
+ * - superadmin: SaaS (todas as empresas)
+ * - admin: acesso total na(s) empresa(s) vinculada(s) — usuários, lançamentos, estoque, PDV, custos, settings
  * - gerente: operação + relatórios + custos; sem usuários e sem configurações
  * - operador: somente PDV
  * - visualizacao: dashboard e relatórios (somente leitura; sem escrita em custos)

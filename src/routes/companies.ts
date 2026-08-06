@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { kvGet } from '../db/kv.js';
 import { query } from '../db/pool.js';
-import { resolveCompanyId } from '../auth/resolve-company.js';
+import { resolveCompanyId, userHasCompanyAccess } from '../auth/resolve-company.js';
 import { getUserProfileByToken } from '../auth/login-service.js';
 import type { AppVariables } from '../middleware/auth.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -64,7 +64,12 @@ companies.get('/superadmin/all', requireAuth, async (c) => {
 });
 
 companies.get('/user/:userId', requireAuth, async (c) => {
+  const auth = c.get('auth');
   const userId = c.req.param('userId');
+  // Só o próprio usuário ou superadmin pode listar vínculos
+  if (auth.role !== 'superadmin' && auth.userId !== userId) {
+    return c.json({ error: 'Forbidden' }, 403);
+  }
   const { rows: links } = await query<{ company_id: string }>(
     'SELECT company_id FROM user_companies WHERE user_id = $1',
     [userId],
@@ -79,9 +84,13 @@ companies.get('/user/:userId', requireAuth, async (c) => {
 });
 
 companies.get('/:id', requireAuth, async (c) => {
-  const { rows } = await query('SELECT * FROM companies WHERE id = $1 LIMIT 1', [
-    c.req.param('id'),
-  ]);
+  const auth = c.get('auth');
+  const companyId = String(c.req.param('id') || '');
+  if (auth.role !== 'superadmin') {
+    const ok = await userHasCompanyAccess(auth, companyId);
+    if (!ok) return c.json({ error: 'Forbidden' }, 403);
+  }
+  const { rows } = await query('SELECT * FROM companies WHERE id = $1 LIMIT 1', [companyId]);
   if (!rows[0]) return c.json({ error: 'Not found' }, 404);
   return c.json({ company: mapCompany(rows[0] as Record<string, unknown>) });
 });
@@ -115,7 +124,7 @@ companies.post('/', requireAuth, async (c) => {
 /** Atualiza nome/CNPJ da empresa (admin da empresa ou Super Admin). */
 companies.patch('/:id', requireAuth, async (c) => {
   const auth = c.get('auth');
-  const companyId = c.req.param('id');
+  const companyId = String(c.req.param('id') || '');
   const isSuper = auth.role === 'superadmin' || auth.role === 'super_admin';
   if (!isSuper) {
     const canManage =
@@ -123,14 +132,7 @@ companies.patch('/:id', requireAuth, async (c) => {
     if (!canManage) {
       return c.json({ error: 'Sem permissão para alterar esta empresa' }, 403);
     }
-    const { rows: links } = await query<{ company_id: string }>(
-      'SELECT company_id FROM user_companies WHERE user_id = $1 AND company_id = $2 LIMIT 1',
-      [auth.userId, companyId],
-    );
-    const belongs =
-      links.length > 0 ||
-      auth.companyId === companyId ||
-      c.req.header('X-Company-Id') === companyId;
+    const belongs = await userHasCompanyAccess(auth, companyId);
     if (!belongs) {
       return c.json({ error: 'Sem permissão para alterar esta empresa' }, 403);
     }
