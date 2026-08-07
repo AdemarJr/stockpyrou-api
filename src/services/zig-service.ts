@@ -166,6 +166,9 @@ function maskToken(t: string): string {
 interface ZigSale {
   transactionId: string;
   transactionDate: string;
+  /** Data do evento/noite na ZIG (YYYY-MM-DD). Operação costuma cruzar meia-noite. */
+  eventDate?: string | null;
+  eventId?: string | null;
   productId: string;
   productSku: string;
   unitValue: number;
@@ -229,17 +232,91 @@ function zigAdditionTotalValueBrl(add: {
   return net > 0 ? net : 0;
 }
 
-/** Data civil (YYYY-MM-DD) da transação no fuso America/Sao_Paulo — evita perder linhas por comparação UTC na string. */
+/** Extrai YYYY-MM-DD de campos ZIG (`eventDate` ou ISO). */
+function normalizeZigYmdField(raw: string | undefined | null): string | null {
+  if (raw == null) return null;
+  const s = String(raw).trim();
+  if (!s) return null;
+  const m = /^(\d{4}-\d{2}-\d{2})/.exec(s);
+  return m ? m[1] : null;
+}
+
+/**
+ * Data civil (YYYY-MM-DD) da transação no fuso America/Sao_Paulo.
+ * Sem offset na string (ex.: docs ZIG `2024-08-23T12:00:00`), usa o dia do próprio texto
+ * — a ZIG envia horário local BR; interpretar como UTC no Railway deslocava a madrugada.
+ */
 function transactionYmdSaoPaulo(iso: string | undefined): string | null {
   if (!iso || !String(iso).trim()) return null;
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return null;
+  const s = String(iso).trim();
+  const dateOnly = normalizeZigYmdField(s);
+  if (dateOnly && /^\d{4}-\d{2}-\d{2}$/.test(s)) return dateOnly;
+  // Offset-less datetime → dia civil como enviado pela ZIG (horário local da operação)
+  if (
+    dateOnly &&
+    /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(s) &&
+    !/[zZ]|[+-]\d{2}:?\d{2}\s*$/.test(s)
+  ) {
+    return dateOnly;
+  }
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return dateOnly;
   return new Intl.DateTimeFormat("en-CA", {
     timeZone: SAO_PAULO_TZ,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
   }).format(d);
+}
+
+function zigSaleEventYmd(sale: Pick<ZigSale, "eventDate">): string | null {
+  return normalizeZigYmdField(sale.eventDate ?? null);
+}
+
+function zigSaleTransactionYmd(sale: Pick<ZigSale, "transactionDate">): string | null {
+  return transactionYmdSaoPaulo(sale.transactionDate);
+}
+
+/**
+ * Dia operacional da linha: preferir `eventDate` (noite/evento ZIG);
+ * senão data civil da transação.
+ */
+function zigSalePrimaryYmd(
+  sale: Pick<ZigSale, "eventDate" | "transactionDate">,
+): string {
+  return (
+    zigSaleEventYmd(sale) ||
+    zigSaleTransactionYmd(sale) ||
+    normalizeZigYmdField(sale.transactionDate) ||
+    ""
+  );
+}
+
+/** Linha pertence ao dia civil `ymd` se evento ou transação cair nesse dia. */
+function zigSaleBelongsToYmd(
+  sale: Pick<ZigSale, "eventDate" | "transactionDate">,
+  ymd: string,
+): boolean {
+  const eventYmd = zigSaleEventYmd(sale);
+  const txYmd = zigSaleTransactionYmd(sale);
+  if (eventYmd === ymd || txYmd === ymd) return true;
+  // Sem datas parseáveis: não descartar (volume)
+  if (!eventYmd && !txYmd) return true;
+  return false;
+}
+
+/** Inclui a linha se evento ou transação estiver no intervalo inclusivo. */
+function zigSaleBelongsToRange(
+  sale: Pick<ZigSale, "eventDate" | "transactionDate">,
+  startYmd: string,
+  endYmd: string,
+): boolean {
+  const eventYmd = zigSaleEventYmd(sale);
+  const txYmd = zigSaleTransactionYmd(sale);
+  const inRange = (ymd: string | null) => !!ymd && ymd >= startYmd && ymd <= endYmd;
+  if (inRange(eventYmd) || inRange(txYmd)) return true;
+  if (!eventYmd && !txYmd) return true;
+  return false;
 }
 
 /**
@@ -590,19 +667,16 @@ async function fetchSaidaProdutosAllPagesForWindow(
 }
 
 /**
- * Mantém linhas cuja data civil em São Paulo é `ymd` (YYYY-MM-DD).
- * Linhas com `transactionDate` inválido não são descartadas (evita perda de volume).
- * Se nenhuma linha casar mas a API devolveu dados, devolve o bruto (comportamento legado).
+ * Mantém linhas do dia civil `ymd`: `eventDate` **ou** data da transação.
+ * Noites ZIG (qua → qui) usam eventDate no dia de abertura; filtrar só por
+ * transactionDate descartava a madrugada.
+ * Se nenhuma linha casar mas a API devolveu dados, devolve o bruto (legado).
  */
 function filterSalesToLocalYmd(sales: ZigSale[], ymd: string): ZigSale[] {
-  const filtered = sales.filter((s) => {
-    const civil = transactionYmdSaoPaulo(s.transactionDate);
-    if (civil === null) return true;
-    return civil === ymd;
-  });
+  const filtered = sales.filter((s) => zigSaleBelongsToYmd(s, ymd));
   if (filtered.length === 0 && sales.length > 0) {
     console.warn(
-      `ZIG: filterSalesToLocalYmd — nenhuma linha com data civil SP=${ymd} (${sales.length} no payload); usando resposta bruta.`,
+      `ZIG: filterSalesToLocalYmd — nenhuma linha com event/transação SP=${ymd} (${sales.length} no payload); usando resposta bruta.`,
     );
     return sales;
   }
@@ -668,7 +742,7 @@ async function fetchOneSaidaChunkForDay(
 
 /**
  * Mescla linhas da ZIG por item de venda (transação + SKU + productId).
- * Se a API repetir a mesma linha, soma `count` em vez de descartar.
+ * Se a API repetir a mesma linha, soma `count` (paginação no mesmo dia).
  */
 function mergeZigSalesLines(merged: Map<string, ZigSale>, chunk: ZigSale[]) {
   for (const sale of chunk) {
@@ -685,11 +759,25 @@ function mergeZigSalesLines(merged: Map<string, ZigSale>, chunk: ZigSale[]) {
   }
 }
 
+/**
+ * União entre dias adjacentes: mesma linha (noite qua→qui) não deve somar quantidade.
+ */
+function unionZigSalesLines(merged: Map<string, ZigSale>, chunk: ZigSale[]) {
+  for (const sale of chunk) {
+    if (!sale?.transactionId) continue;
+    const key = zigLineItemId(sale);
+    if (!merged.has(key)) {
+      merged.set(key, { ...sale });
+    }
+  }
+}
+
 /** Pausa entre chamadas ao gateway ZIG. */
 const ZIG_INTER_CALL_DELAY_MS = 150;
 
 /**
  * Várias chamadas GET, **uma por dia civil (SP)**; cada dia tenta primeiro dtinicio = dtfim (YYYY-MM-DD), com fallback documentado em `fetchOneSaidaChunkForDay`.
+ * Após mesclar, mantém linhas cujo **evento ou transação** cai no intervalo (noites qua→qui).
  */
 async function fetchZigSaidaProdutosRange(
   token: string,
@@ -717,10 +805,17 @@ async function fetchZigSaidaProdutosRange(
       await new Promise((r) => setTimeout(r, ZIG_INTER_CALL_DELAY_MS));
     }
     const chunk = await fetchOneSaidaChunkForDay(token, storeId, ymd);
-    mergeZigSalesLines(merged, chunk);
+    unionZigSalesLines(merged, chunk);
   }
 
-  return Array.from(merged.values());
+  const all = Array.from(merged.values());
+  const inRange = all.filter((s) => zigSaleBelongsToRange(s, startYmd, endYmd));
+  if (inRange.length < all.length) {
+    console.log(
+      `ZIG: intervalo ${startYmd}→${endYmd}: ${all.length} linha(s) mescladas, ${inRange.length} no período (eventDate|transactionDate).`,
+    );
+  }
+  return inRange;
 }
 
 const MAX_ZIG_SAIDA_REPORT_DAYS = 93;
@@ -754,10 +849,14 @@ function accumulateZigSaleForReport(
   global: { lineCount: number; totalQty: number; totalValue: number },
   byDay: Record<string, { lines: number; qty: number; value: number }>,
 ) {
-  const ymd =
-    transactionYmdSaoPaulo(sale.transactionDate) ||
-    (sale.transactionDate || "").split("T")[0];
-  if (!ymd || ymd < startYmd || ymd > endYmd) return;
+  const ymd = (() => {
+    const eventYmd = zigSaleEventYmd(sale);
+    const txYmd = zigSaleTransactionYmd(sale);
+    if (eventYmd && eventYmd >= startYmd && eventYmd <= endYmd) return eventYmd;
+    if (txYmd && txYmd >= startYmd && txYmd <= endYmd) return txYmd;
+    return zigSalePrimaryYmd(sale);
+  })();
+  if (!ymd || !zigSaleBelongsToRange(sale, startYmd, endYmd)) return;
 
   const bump = (lines: number, qty: number, value: number) => {
     global.lineCount += lines;
@@ -974,15 +1073,43 @@ export const getStores = async (token: string, redeId?: string): Promise<ZigStor
 
 export const saveConfig = async (
   companyId: string,
-  storeId: string,
+  storeId?: string,
   redeId?: string,
   zigToken?: string,
 ) => {
   const prev = ((await kvGet(`zig_config:${companyId}`)) as ZigKvConfig | null) || {};
-  const next: ZigKvConfig = { ...prev, storeId, redeId };
+  const next: ZigKvConfig = { ...prev };
+  if (storeId != null && String(storeId).trim()) {
+    next.storeId = String(storeId).trim();
+  }
+  if (redeId != null) {
+    next.redeId = String(redeId).trim();
+  }
   const t = zigToken?.trim();
-  if (t) next.zigToken = t;
+  if (t) {
+    next.zigToken = t;
+  }
+  if (!next.storeId && !next.zigToken) {
+    throw new Error("Informe o token ZIG e/ou a loja para salvar.");
+  }
   await kvSet(`zig_config:${companyId}`, next);
+  return {
+    storeId: next.storeId,
+    redeId: next.redeId,
+    hasZigToken: !!next.zigToken?.trim(),
+    zigTokenMasked: next.zigToken?.trim() ? maskToken(next.zigToken.trim()) : undefined,
+  };
+};
+
+/** Persiste só o token (e opcionalmente rede), sem exigir loja. */
+export const saveZigTokenOnly = async (
+  companyId: string,
+  zigToken: string,
+  redeId?: string,
+) => {
+  const t = zigToken.trim();
+  if (!t) throw new Error("Token ZIG vazio.");
+  return saveConfig(companyId, undefined, redeId, t);
 };
 
 export const getConfig = async (companyId: string) => {
@@ -1073,6 +1200,8 @@ export const fetchPendingSales = async (
           sales.push({
             transactionId: s.transactionId,
             transactionDate: s.transactionDate,
+            eventDate: s.eventDate ?? null,
+            eventId: s.eventId ?? null,
             productId: `add:${sku}`,
             productSku: sku,
             unitValue: Number((add as any)?.unitValue ?? 0) || 0,
@@ -1156,9 +1285,7 @@ export const fetchPendingSales = async (
       
       const product = findProduct(sale);
       const qtyEff = zigEffectiveCount(sale);
-      const saleDate =
-        transactionYmdSaoPaulo(sale.transactionDate) ||
-        (sale.transactionDate || "").split("T")[0];
+      const saleDate = zigSalePrimaryYmd(sale);
       
       const lineId = zigLineItemId(sale);
       const displaySku = sale.productSku?.trim() || matchKey;
@@ -1363,10 +1490,7 @@ function buildDeductionGroupsFromZigSales(
   const groups = new Map<string, DeductionGroup>();
   for (const sale of sales) {
     const lineId = zigLineItemId(sale);
-    const saleDate =
-      transactionYmdSaoPaulo(sale.transactionDate) ||
-      (sale.transactionDate || "").split("T")[0] ||
-      "";
+    const saleDate = zigSalePrimaryYmd(sale);
     if (sale.productSku && selectedSet.has(lineId)) {
       addToDeductionGroup(
         groups,

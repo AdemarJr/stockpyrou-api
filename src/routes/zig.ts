@@ -13,6 +13,7 @@ import {
   runAutoBaixaZigOntem,
   saveAutoBaixaConfig,
   saveConfig,
+  saveZigTokenOnly,
   type ZigConfirmLineItem,
 } from '../services/zig-service.js';
 
@@ -72,10 +73,21 @@ zig.get('/stores', async (c) => {
 zig.post('/config', async (c) => {
   try {
     const { companyId, storeId, redeId, zigToken } = await c.req.json();
-    if (!companyId || !storeId) return c.json({ error: 'Missing required fields' }, 400);
+    if (!companyId) return c.json({ error: 'Missing companyId' }, 400);
 
-    await saveConfig(companyId, storeId, redeId, zigToken);
-    return c.json({ success: true });
+    const tok = typeof zigToken === 'string' ? zigToken.trim() : '';
+    const sid = typeof storeId === 'string' ? storeId.trim() : '';
+
+    // Token sozinho (antes de escolher loja) ou loja (+ token opcional)
+    if (!sid && !tok) {
+      return c.json({ error: 'Informe o token ZIG e/ou a loja' }, 400);
+    }
+
+    const saved = sid
+      ? await saveConfig(companyId, sid, redeId, tok || undefined)
+      : await saveZigTokenOnly(companyId, tok, redeId);
+
+    return c.json({ success: true, config: saved });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Erro ao salvar configuração ZIG';
     console.error('Zig Config Error:', error);
