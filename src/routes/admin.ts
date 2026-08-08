@@ -226,10 +226,78 @@ admin.post('/create-user', requireAuth, async (c) => {
 admin.delete('/companies/:id', requireAuth, async (c) => {
   if (!requireSuperAdmin(c)) return c.json({ error: 'Unauthorized - Admin access required' }, 401);
 
-  const companyId = c.req.param('id');
+  const companyId = String(c.req.param('id') || '').trim();
+  if (!companyId) return c.json({ error: 'Company id is required' }, 400);
+  const { rows: existing } = await query(`SELECT id FROM companies WHERE id = $1 LIMIT 1`, [
+    companyId,
+  ]);
+  if (!existing[0]) return c.json({ error: 'Company not found' }, 404);
+
+  // FKs para companies sem CASCADE na maioria das tabelas — limpa dados operacionais antes.
+  try {
+    await clearCompanyData(companyId, {
+      stockQuantities: false,
+      stockEntries: true,
+      movements: true,
+      priceHistory: true,
+      products: true,
+      suppliers: true,
+      sales: true,
+      customers: true,
+      costs: true,
+      inboundNfe: true,
+      zigCache: true,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[admin/delete-company] clear-data', err);
+    return c.json(
+      {
+        error: `Não foi possível limpar os dados da empresa antes de excluir: ${message}`,
+      },
+      500,
+    );
+  }
+
   await query(`DELETE FROM user_companies WHERE company_id = $1`, [companyId]);
   await query(`UPDATE app_users SET company_id = NULL WHERE company_id = $1`, [companyId]);
-  const { rowCount } = await query(`DELETE FROM companies WHERE id = $1`, [companyId]);
+
+  // Cadastros fiscais / estruturais que clear-data não remove
+  const residualDeletes = [
+    `DELETE FROM fiscal_certificate WHERE company_id = $1`,
+    `DELETE FROM company_credentials WHERE company_id = $1`,
+    `DELETE FROM cost_targets WHERE company_id = $1`,
+    `DELETE FROM budget_items WHERE budget_id IN (SELECT id FROM budgets WHERE company_id = $1)`,
+    `DELETE FROM budgets WHERE company_id = $1`,
+    `DELETE FROM alerts WHERE company_id = $1`,
+    `DELETE FROM zig_processed_transactions WHERE company_id = $1`,
+    `DELETE FROM zig_configurations WHERE company_id = $1`,
+    // expense_types referencia cost_centers
+    `DELETE FROM expense_types WHERE company_id = $1`,
+    `DELETE FROM cost_centers WHERE company_id = $1`,
+  ];
+  for (const sql of residualDeletes) {
+    try {
+      await query(sql, [companyId]);
+    } catch {
+      /* tabela/coluna pode não existir */
+    }
+  }
+
+  let rowCount = 0;
+  try {
+    const deleted = await query(`DELETE FROM companies WHERE id = $1`, [companyId]);
+    rowCount = deleted.rowCount ?? 0;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[admin/delete-company]', err);
+    return c.json(
+      {
+        error: `Falha ao excluir empresa (possível vínculo residual): ${message}`,
+      },
+      409,
+    );
+  }
   if (!rowCount) return c.json({ error: 'Company not found' }, 404);
 
   await kvDel(`company_status:${companyId}`);

@@ -6,6 +6,37 @@ import { requireAuth, requirePermission } from '../middleware/auth.js';
 import { createReceivableFromSale } from './receivables.js';
 import { ledgerFromSale } from '../services/ledger.js';
 
+function parseSalePaymentDetails(sale: Record<string, unknown>): Record<string, unknown> {
+  const raw = sale.payment_details ?? sale.paymentDetails;
+  if (raw && typeof raw === 'object') return raw as Record<string, unknown>;
+  if (typeof raw === 'string') {
+    try {
+      return JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
+/** Valor que entrou na gaveta (dinheiro/pix), alinhado ao POST /cashier/sale. */
+function drawerInFromSale(sale: Record<string, unknown>): number {
+  const details = parseSalePaymentDetails(sale);
+  const split = Array.isArray(details.payments)
+    ? (details.payments as Array<{ method?: string; amount?: number }>)
+    : null;
+  if (split && split.length > 0) {
+    return split
+      .filter((p) => p.method === 'money' || p.method === 'pix')
+      .reduce((s, p) => s + (parseFloat(String(p.amount)) || 0), 0);
+  }
+  const method = String(sale.payment_method ?? sale.paymentMethod ?? 'money');
+  if (method === 'money' || method === 'pix') {
+    return parseFloat(String(sale.total)) || 0;
+  }
+  return 0;
+}
+
 function calculatePaymentBreakdown(sales: Array<Record<string, unknown>>) {
   const breakdown: Record<string, { count: number; total: number }> = {
     money: { count: 0, total: 0 },
@@ -16,6 +47,20 @@ function calculatePaymentBreakdown(sales: Array<Record<string, unknown>>) {
     boleto: { count: 0, total: 0 },
   };
   for (const sale of sales) {
+    const details = parseSalePaymentDetails(sale);
+    const split = Array.isArray(details.payments)
+      ? (details.payments as Array<{ method?: string; amount?: number }>)
+      : null;
+    if (split && split.length > 0) {
+      for (const part of split) {
+        const method = String(part.method || 'money');
+        const amount = parseFloat(String(part.amount)) || 0;
+        if (!breakdown[method] || amount <= 0) continue;
+        breakdown[method].count += 1;
+        breakdown[method].total += amount;
+      }
+      continue;
+    }
     const method = String(sale.payment_method ?? sale.paymentMethod ?? 'money');
     if (breakdown[method]) {
       breakdown[method].count++;
@@ -498,10 +543,11 @@ cashier.post('/close', async (c) => {
   ]);
 
   const totalSales = sales.reduce((s, r) => s + (parseFloat(String(r.total)) || 0), 0);
-  // Dinheiro em gaveta: só vendas em dinheiro entram no esperado do caixa físico
-  const cashSales = sales
-    .filter((r) => String(r.payment_method || 'money') === 'money')
-    .reduce((s, r) => s + (parseFloat(String(r.total)) || 0), 0);
+  // Gaveta: dinheiro + pix (inclui fatias de pagamento misto) — espelha POST /sale
+  const cashSales = sales.reduce(
+    (s, r) => s + drawerInFromSale(r as Record<string, unknown>),
+    0,
+  );
   const totalWithdrawals = movements
     .filter((m) => m.type === 'withdrawal')
     .reduce((s, m) => s + (parseFloat(String(m.amount)) || 0), 0);

@@ -14,13 +14,14 @@ reports.get('/sales', async (c) => {
 
   const params: unknown[] = [companyId];
   let sql = `SELECT * FROM sales WHERE company_id = $1`;
+  // Datas civis inclusive em America/Sao_Paulo (evita `<= YYYY-MM-DD` = meia-noite UTC).
   if (startDate) {
     params.push(startDate);
-    sql += ` AND timestamp >= $${params.length}`;
+    sql += ` AND timestamp >= ($${params.length}::date AT TIME ZONE 'America/Sao_Paulo')`;
   }
   if (endDate) {
     params.push(endDate);
-    sql += ` AND timestamp <= $${params.length}`;
+    sql += ` AND timestamp < (($${params.length}::date + 1) AT TIME ZONE 'America/Sao_Paulo')`;
   }
   params.push(limit);
   sql += ` ORDER BY timestamp DESC LIMIT $${params.length}`;
@@ -68,11 +69,11 @@ reports.get('/closures', async (c) => {
   let sql = `SELECT * FROM cash_registers WHERE company_id = $1 AND status = 'closed'`;
   if (startDate) {
     params.push(startDate);
-    sql += ` AND closed_at >= $${params.length}`;
+    sql += ` AND closed_at >= ($${params.length}::date AT TIME ZONE 'America/Sao_Paulo')`;
   }
   if (endDate) {
     params.push(endDate);
-    sql += ` AND closed_at <= $${params.length}`;
+    sql += ` AND closed_at < (($${params.length}::date + 1) AT TIME ZONE 'America/Sao_Paulo')`;
   }
   sql += ' ORDER BY closed_at DESC';
 

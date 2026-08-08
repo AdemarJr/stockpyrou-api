@@ -65,6 +65,10 @@ export async function clearCompanyData(
     // receivables referenciam customer; vendas também podem
     options.sales = true;
   }
+  if (options.stockEntries) {
+    // Entradas de compra geram financial_movements.stock_entry_id
+    options.costs = true;
+  }
 
   const deletions: Record<string, number> = {};
   const warnings: string[] = [];
@@ -175,7 +179,14 @@ export async function clearCompanyData(
       await run('movements', `DELETE FROM stock_movements WHERE company_id = $1`);
     }
     if (options.stockEntries) {
-      // desvincula despesas que apontam para entrada (se FK SET NULL não existir)
+      // FK: financial_movements.stock_entry_id → stock_entries (sem ON DELETE CASCADE)
+      // Alinhado ao DELETE de recebimento em routes/stock.ts
+      await run(
+        'financialMovementsStockEntries',
+        `DELETE FROM financial_movements
+         WHERE company_id = $1 AND stock_entry_id IS NOT NULL`,
+      );
+      // Desvincula despesas ligadas à entrada (coluna nullable)
       try {
         await client.query(
           `UPDATE operational_expenses SET stock_entry_id = NULL
@@ -201,6 +212,43 @@ export async function clearCompanyData(
     }
 
     if (options.products) {
+      // FK: sale_items.product_id → products (nullable, sem CASCADE)
+      try {
+        await client.query(
+          `UPDATE sale_items SET product_id = NULL
+           WHERE company_id = $1 AND product_id IS NOT NULL`,
+          [companyId],
+        );
+      } catch (err) {
+        if (!isMissingRelation(err)) {
+          // schema antigo sem company_id em sale_items
+          if (/column .*company_id/i.test(err instanceof Error ? err.message : String(err))) {
+            await client.query(
+              `UPDATE sale_items SET product_id = NULL
+               WHERE product_id IS NOT NULL
+                 AND sale_id IN (SELECT id FROM sales WHERE company_id = $1)`,
+              [companyId],
+            );
+          } else {
+            throw err;
+          }
+        }
+      }
+      // FK: cost_targets.product_id → products
+      await run(
+        'costTargets',
+        `DELETE FROM cost_targets WHERE company_id = $1 AND product_id IS NOT NULL`,
+      );
+      // nfce_item.product_id é nullable e sem FK; limpa referência por higiene
+      try {
+        await client.query(
+          `UPDATE nfce_item SET product_id = NULL
+           WHERE company_id = $1 AND product_id IS NOT NULL`,
+          [companyId],
+        );
+      } catch {
+        /* ignore */
+      }
       await run(
         'recipeIngredients',
         `DELETE FROM recipe_ingredients WHERE company_id = $1`,

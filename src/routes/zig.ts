@@ -1,7 +1,9 @@
 import type { Context } from 'hono';
 import { Hono } from 'hono';
 import { query } from '../db/pool.js';
+import { userHasCompanyAccess } from '../auth/resolve-company.js';
 import type { AppVariables } from '../middleware/auth.js';
+import { requireAuth } from '../middleware/auth.js';
 import {
   buildZigSaidaComparisonReport,
   confirmStockFromZigPreviewSnapshot,
@@ -18,6 +20,29 @@ import {
 } from '../services/zig-service.js';
 
 const zig = new Hono<{ Variables: AppVariables }>();
+
+/** Cron usa segredo próprio; /meta é diagnóstico. Demais rotas exigem sessão. */
+zig.use('*', async (c, next) => {
+  const path = c.req.path;
+  if (path.endsWith('/cron-auto-yesterday') || path.endsWith('/meta')) {
+    await next();
+    return;
+  }
+  return requireAuth(c, next);
+});
+
+async function assertZigCompanyAccess(
+  c: Context<{ Variables: AppVariables }>,
+  companyId: string | undefined | null,
+) {
+  const id = String(companyId || '').trim();
+  if (!id) return c.json({ error: 'Missing companyId' }, 400);
+  const auth = c.get('auth');
+  if (!(await userHasCompanyAccess(auth, id))) {
+    return c.json({ error: 'Sem acesso a esta empresa' }, 403);
+  }
+  return id;
+}
 
 function storesErrorResponse(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
@@ -60,6 +85,10 @@ zig.get('/stores', async (c) => {
   try {
     const redeId = c.req.query('rede') || '35c5259d-4d3a-4934-9dd2-78a057a3aa8f';
     const companyId = c.req.query('companyId') || undefined;
+    if (companyId) {
+      const denied = await assertZigCompanyAccess(c, companyId);
+      if (typeof denied !== 'string') return denied;
+    }
     const headerToken = c.req.header('X-ZIG-TOKEN') || undefined;
     const token = await resolveZigTokenForStores(companyId, headerToken);
     const stores = await getStores(token, redeId);
@@ -73,7 +102,8 @@ zig.get('/stores', async (c) => {
 zig.post('/config', async (c) => {
   try {
     const { companyId, storeId, redeId, zigToken } = await c.req.json();
-    if (!companyId) return c.json({ error: 'Missing companyId' }, 400);
+    const allowed = await assertZigCompanyAccess(c, companyId);
+    if (typeof allowed !== 'string') return allowed;
 
     const tok = typeof zigToken === 'string' ? zigToken.trim() : '';
     const sid = typeof storeId === 'string' ? storeId.trim() : '';
@@ -84,8 +114,8 @@ zig.post('/config', async (c) => {
     }
 
     const saved = sid
-      ? await saveConfig(companyId, sid, redeId, tok || undefined)
-      : await saveZigTokenOnly(companyId, tok, redeId);
+      ? await saveConfig(allowed, sid, redeId, tok || undefined)
+      : await saveZigTokenOnly(allowed, tok, redeId);
 
     return c.json({ success: true, config: saved });
   } catch (error) {
@@ -98,8 +128,9 @@ zig.post('/config', async (c) => {
 zig.get('/config/:companyId', async (c) => {
   try {
     const companyId = c.req.param('companyId');
-    if (!companyId) return c.json({ error: 'Missing companyId' }, 400);
-    const config = await getConfig(companyId);
+    const allowed = await assertZigCompanyAccess(c, companyId);
+    if (typeof allowed !== 'string') return allowed;
+    const config = await getConfig(allowed);
     return c.json({ config });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Erro ao ler configuração ZIG';
@@ -111,9 +142,10 @@ zig.get('/config/:companyId', async (c) => {
 zig.post('/preview', async (c) => {
   try {
     const { companyId, startDate, endDate, includeProcessed } = await c.req.json();
-    if (!companyId) return c.json({ error: 'Missing companyId' }, 400);
+    const allowed = await assertZigCompanyAccess(c, companyId);
+    if (typeof allowed !== 'string') return allowed;
 
-    const result = await fetchPendingSales(companyId, startDate, endDate, {
+    const result = await fetchPendingSales(allowed, startDate, endDate, {
       includeProcessed: !!includeProcessed,
     });
     return c.json(result);
@@ -128,7 +160,9 @@ async function handleZigConfirm(c: Context<{ Variables: AppVariables }>) {
   try {
     const body = (await c.req.json()) as Record<string, unknown>;
     const { companyId, transactionIds, registeredOnly, lineItems, previewSessionId } = body;
-    if (!companyId || !Array.isArray(transactionIds) || transactionIds.length === 0) {
+    const allowed = await assertZigCompanyAccess(c, companyId as string);
+    if (typeof allowed !== 'string') return allowed;
+    if (!Array.isArray(transactionIds) || transactionIds.length === 0) {
       return c.json(
         {
           error:
@@ -156,7 +190,7 @@ async function handleZigConfirm(c: Context<{ Variables: AppVariables }>) {
     }
 
     const result = await confirmStockFromZigPreviewSnapshot(
-      companyId as string,
+      allowed,
       transactionIds as string[],
       lineItemsArr.length > 0 ? (lineItemsArr as ZigConfirmLineItem[]) : undefined,
       sid,
@@ -183,9 +217,9 @@ zig.get('/meta', (c) =>
 
 zig.get('/auto-baixa/:companyId', async (c) => {
   try {
-    const companyId = c.req.param('companyId');
-    if (!companyId) return c.json({ error: 'Missing companyId' }, 400);
-    const cfg = await getAutoBaixaConfig(companyId);
+    const allowed = await assertZigCompanyAccess(c, c.req.param('companyId'));
+    if (typeof allowed !== 'string') return allowed;
+    const cfg = await getAutoBaixaConfig(allowed);
     return c.json(cfg);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Erro ao ler auto-baixa ZIG';
@@ -197,10 +231,12 @@ zig.get('/auto-baixa/:companyId', async (c) => {
 zig.post('/auto-baixa', async (c) => {
   try {
     const { companyId, enabled } = await c.req.json();
-    if (!companyId || typeof enabled !== 'boolean') {
+    const allowed = await assertZigCompanyAccess(c, companyId);
+    if (typeof allowed !== 'string') return allowed;
+    if (typeof enabled !== 'boolean') {
       return c.json({ error: 'Missing companyId or enabled (boolean)' }, 400);
     }
-    await saveAutoBaixaConfig(companyId, enabled);
+    await saveAutoBaixaConfig(allowed, enabled);
     return c.json({ success: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Erro ao salvar auto-baixa ZIG';
@@ -212,8 +248,9 @@ zig.post('/auto-baixa', async (c) => {
 zig.post('/auto-run', async (c) => {
   try {
     const { companyId } = await c.req.json();
-    if (!companyId) return c.json({ error: 'Missing companyId' }, 400);
-    const result = await runAutoBaixaZigOntem(companyId);
+    const allowed = await assertZigCompanyAccess(c, companyId);
+    if (typeof allowed !== 'string') return allowed;
+    const result = await runAutoBaixaZigOntem(allowed);
     return c.json(result);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Erro ao executar auto-baixa ZIG';
@@ -226,16 +263,17 @@ zig.post('/auto-run', async (c) => {
 zig.get('/saida-comparison', async (c) => {
   try {
     const companyId = c.req.query('companyId') || c.req.header('X-Company-Id');
+    const allowed = await assertZigCompanyAccess(c, companyId);
+    if (typeof allowed !== 'string') return allowed;
     const startDate = c.req.query('startDate');
     const endDate = c.req.query('endDate');
-    if (!companyId) return c.json({ error: 'Missing companyId' }, 400);
     if (!startDate || !endDate) {
       return c.json(
         { error: 'Informe startDate e endDate (YYYY-MM-DD) no período do relatório.' },
         400,
       );
     }
-    const result = await buildZigSaidaComparisonReport(companyId, startDate, endDate);
+    const result = await buildZigSaidaComparisonReport(allowed, startDate, endDate);
     return c.json(result);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Erro ao montar comparativo ZIG';
