@@ -262,21 +262,17 @@ export async function clearCompanyData(
       );
     }
 
-    // --- Cache ZIG (KV) ---
+    // --- Cache ZIG (KV) — NÃO apaga credenciais (zig_config) nem preferências ---
     if (options.zigCache) {
       try {
         const r = await client.query(
           `DELETE FROM kv_store_8a20b27d
-           WHERE key LIKE $1 OR key LIKE $2 OR key LIKE $3 OR key LIKE $4
-              OR key LIKE $5 OR key LIKE $6 OR key LIKE $7`,
+           WHERE key LIKE $1 OR key LIKE $2 OR key LIKE $3 OR key LIKE $4`,
           [
-            `zig_config:${companyId}`,
             `zig_processed:${companyId}:%`,
-            `zig_product_mappings:${companyId}`,
             `zig_preview_session:${companyId}:%`,
-            `zig_sales_register:${companyId}`,
             `zig_revenue_recorded:${companyId}:%`,
-            `zig_auto_baixa:${companyId}`,
+            `zig_last_sync:${companyId}`,
           ],
         );
         deletions.zigCache = r.rowCount ?? 0;

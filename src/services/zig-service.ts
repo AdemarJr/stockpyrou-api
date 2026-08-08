@@ -125,9 +125,35 @@ type ZigKvConfig = {
   zigToken?: string;
 };
 
+function parseZigKvConfig(raw: unknown): ZigKvConfig | null {
+  if (raw == null) return null;
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      return parseZigKvConfig(parsed);
+    } catch {
+      return null;
+    }
+  }
+  if (typeof raw !== 'object' || Array.isArray(raw)) return null;
+  return raw as ZigKvConfig;
+}
+
+/** Normaliza redeId se veio concatenado (UUID+UUID sem separador). */
+function normalizeRedeId(redeId: string | undefined | null): string | undefined {
+  if (redeId == null) return undefined;
+  const s = String(redeId).trim();
+  if (!s) return undefined;
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.exec(s);
+  if (uuid && s.length > uuid[0].length) {
+    return uuid[0];
+  }
+  return s;
+}
+
 /** Token ZIG: 1) KV por empresa (`zigToken`), 2) variável de ambiente `ZIG_API_KEY` (dev/legado). */
 export async function getZigTokenForCompany(companyId: string): Promise<string> {
-  const cfg = (await kvGet(`zig_config:${companyId}`)) as ZigKvConfig | null;
+  const cfg = parseZigKvConfig(await kvGet(`zig_config:${companyId}`));
   const fromKv = cfg?.zigToken?.trim();
   if (fromKv) return fromKv;
   const env = process.env.ZIG_API_KEY?.trim();
@@ -918,7 +944,7 @@ export async function buildZigSaidaComparisonReport(
   }
 
   const token = await getZigTokenForCompany(companyId);
-  const config = (await kvGet(`zig_config:${companyId}`)) as ZigKvConfig | null;
+  const config = parseZigKvConfig(await kvGet(`zig_config:${companyId}`));
   if (!config?.storeId) {
     throw new Error(
       "Integração ZIG não configurada. Informe token e loja em Integrações → ZIG.",
@@ -1077,13 +1103,16 @@ export const saveConfig = async (
   redeId?: string,
   zigToken?: string,
 ) => {
-  const prev = ((await kvGet(`zig_config:${companyId}`)) as ZigKvConfig | null) || {};
+  const prev = parseZigKvConfig(await kvGet(`zig_config:${companyId}`)) || {};
   const next: ZigKvConfig = { ...prev };
   if (storeId != null && String(storeId).trim()) {
     next.storeId = String(storeId).trim();
   }
-  if (redeId != null) {
-    next.redeId = String(redeId).trim();
+  const normalizedRede = normalizeRedeId(redeId);
+  if (normalizedRede != null) {
+    next.redeId = normalizedRede;
+  } else if (next.redeId) {
+    next.redeId = normalizeRedeId(next.redeId) || next.redeId;
   }
   const t = zigToken?.trim();
   if (t) {
@@ -1093,6 +1122,13 @@ export const saveConfig = async (
     throw new Error("Informe o token ZIG e/ou a loja para salvar.");
   }
   await kvSet(`zig_config:${companyId}`, next);
+
+  // Confirma leitura imediata (falha ruidosa se o KV não gravou)
+  const verify = parseZigKvConfig(await kvGet(`zig_config:${companyId}`));
+  if (t && !verify?.zigToken?.trim()) {
+    throw new Error("Falha ao gravar o token ZIG no banco (KV). Tente novamente.");
+  }
+
   return {
     storeId: next.storeId,
     redeId: next.redeId,
@@ -1113,12 +1149,12 @@ export const saveZigTokenOnly = async (
 };
 
 export const getConfig = async (companyId: string) => {
-  const raw = (await kvGet(`zig_config:${companyId}`)) as ZigKvConfig | null;
+  const raw = parseZigKvConfig(await kvGet(`zig_config:${companyId}`));
   if (!raw) return null;
   const tok = raw.zigToken?.trim();
   return {
     storeId: raw.storeId,
-    redeId: raw.redeId,
+    redeId: normalizeRedeId(raw.redeId) || raw.redeId,
     hasZigToken: !!tok,
     zigTokenMasked: tok ? maskToken(tok) : undefined,
   };
@@ -1146,7 +1182,7 @@ export const fetchPendingSales = async (
 ) => {
   const token = await getZigTokenForCompany(companyId);
 
-  const config = await kvGet(`zig_config:${companyId}`);
+  const config = parseZigKvConfig(await kvGet(`zig_config:${companyId}`));
   if (!config || !config.storeId) {
     throw new Error("Integração ZIG não configurada. Selecione uma loja nas configurações.");
   }
@@ -1839,7 +1875,7 @@ export async function confirmStockFromZigPreviewSnapshot(
   previewSessionId: string | undefined,
   registeredOnly: boolean,
 ): Promise<{ processed: number; createdProducts: number; message: string }> {
-  const config = await kvGet(`zig_config:${companyId}`);
+  const config = parseZigKvConfig(await kvGet(`zig_config:${companyId}`));
   if (!config?.storeId) {
     throw new Error("Integração ZIG não configurada.");
   }
@@ -1952,7 +1988,7 @@ export const confirmSales = async (
   endDate?: string,
   options?: ConfirmSalesOptions,
 ) => {
-  const config = await kvGet(`zig_config:${companyId}`);
+  const config = parseZigKvConfig(await kvGet(`zig_config:${companyId}`));
   if (!config || !config.storeId) {
     throw new Error("Integração ZIG não configurada.");
   }
@@ -2102,7 +2138,7 @@ export async function runAutoBaixaZigOntem(companyId: string) {
     };
   }
 
-  const config = await kvGet(`zig_config:${companyId}`);
+  const config = parseZigKvConfig(await kvGet(`zig_config:${companyId}`));
   if (!config?.storeId) {
     return {
       skipped: true,

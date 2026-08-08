@@ -38,6 +38,9 @@ async function assertZigCompanyAccess(
   const id = String(companyId || '').trim();
   if (!id) return c.json({ error: 'Missing companyId' }, 400);
   const auth = c.get('auth');
+  if (!auth) {
+    return c.json({ error: 'Unauthorized' }, 401);
+  }
   if (!(await userHasCompanyAccess(auth, id))) {
     return c.json({ error: 'Sem acesso a esta empresa' }, 403);
   }
