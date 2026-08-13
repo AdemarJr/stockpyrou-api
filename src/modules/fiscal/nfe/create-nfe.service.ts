@@ -1,23 +1,14 @@
 import { query } from '../../../db/pool.js';
 import { decryptSecret } from '../secrets.js';
 import { getFiscalConfigRow } from '../config/fiscal-config.service.js';
-import {
-  getSefazEndpoints,
-  normalizeFiscalEnvironment,
-  resolveCscForEnvironment,
-  type FiscalEnvironment,
-} from '../sefaz/sefaz-endpoints.js';
+import { normalizeFiscalEnvironment, type FiscalEnvironment } from '../sefaz/sefaz-endpoints.js';
 import { loadCompanyCertificate, signXmlEnveloped } from '../certificate/xml-signer.js';
 import { SefazAmClient } from '../sefaz/sefaz-client.js';
-import { buildAccessKey, onlyDigits, formatNFeDate, escapeXml } from './nfce-utils.js';
-import {
-  attachInfNFeSupl,
-  buildNfceXml,
-  buildQrCodeUrl,
-  wrapNFeProc,
-} from './nfce-xml-builder.js';
-import { buildDanfeHtml, buildEmitAddressLines, ensureDanfeQrEmbedded } from './danfe.js';
-import { resolveRespTec } from './resp-tec.js';
+import { buildAccessKey, onlyDigits, formatNFeDate, escapeXml } from '../nfce/nfce-utils.js';
+import { buildNfeXml, wrapNFeProc } from './nfe-xml-builder.js';
+import { buildNfeDanfeHtml } from './danfe-nfe.js';
+import { buildEmitAddressLines } from '../nfce/danfe.js';
+import { resolveRespTec } from '../nfce/resp-tec.js';
 
 async function writeFiscalLog(params: {
   companyId: string;
@@ -55,31 +46,44 @@ async function writeFiscalLog(params: {
   }
 }
 
-async function reserveNumber(companyId: string, serie: number): Promise<number> {
+async function ensureNfeNumberColumns(): Promise<void> {
+  try {
+    await query(`
+      ALTER TABLE public.fiscal_config
+        ADD COLUMN IF NOT EXISTS serie_nfe integer NOT NULL DEFAULT 1,
+        ADD COLUMN IF NOT EXISTS numero_nfe integer NOT NULL DEFAULT 0
+    `);
+  } catch (err) {
+    console.warn('[nfe] serie/numero_nfe:', err instanceof Error ? err.message : err);
+  }
+}
+
+async function reserveNfeNumber(companyId: string, serie: number): Promise<number> {
+  await ensureNfeNumberColumns();
   const { rows } = await query(
     `UPDATE fiscal_config
-     SET numero_nfce = numero_nfce + 1, updated_at = now()
-     WHERE company_id = $1 AND serie_nfce = $2
-     RETURNING numero_nfce`,
+     SET numero_nfe = numero_nfe + 1, updated_at = now()
+     WHERE company_id = $1 AND COALESCE(serie_nfe, 1) = $2
+     RETURNING numero_nfe`,
     [companyId, serie],
   );
   if (!rows[0]) {
     const { rows: any } = await query(
-      `UPDATE fiscal_config SET numero_nfce = numero_nfce + 1, updated_at = now()
-       WHERE company_id = $1 RETURNING numero_nfce, serie_nfce`,
+      `UPDATE fiscal_config SET numero_nfe = COALESCE(numero_nfe, 0) + 1, updated_at = now()
+       WHERE company_id = $1 RETURNING numero_nfe`,
       [companyId],
     );
     if (!any[0]) throw new Error('Configuração fiscal não encontrada');
-    return Number(any[0].numero_nfce);
+    return Number(any[0].numero_nfe);
   }
-  return Number(rows[0].numero_nfce);
+  return Number(rows[0].numero_nfe);
 }
 
 function tpAmb(env: FiscalEnvironment): '1' | '2' {
   return env === 'production' ? '1' : '2';
 }
 
-function mapNfce(row: Record<string, unknown>) {
+function mapNfe(row: Record<string, unknown>) {
   return {
     id: String(row.id),
     companyId: String(row.company_id),
@@ -88,7 +92,7 @@ function mapNfce(row: Record<string, unknown>) {
     chaveAcesso: row.chave_acesso != null ? String(row.chave_acesso) : null,
     numero: Number(row.numero),
     serie: Number(row.serie),
-    modelo: String(row.modelo || '65'),
+    modelo: String(row.modelo || '55'),
     ambiente: String(row.ambiente),
     status: String(row.status),
     protocolo: row.protocolo != null ? String(row.protocolo) : null,
@@ -102,69 +106,60 @@ function mapNfce(row: Record<string, unknown>) {
   };
 }
 
-export async function getNfceById(companyId: string, id: string) {
+export async function getNfeById(companyId: string, id: string) {
   const { rows } = await query(
-    `SELECT * FROM nfce WHERE id = $1 AND company_id = $2
-       AND COALESCE(modelo, '65') = '65' LIMIT 1`,
+    `SELECT * FROM nfce WHERE id = $1 AND company_id = $2 AND modelo = '55' LIMIT 1`,
     [id, companyId],
   );
-  return rows[0] ? mapNfce(rows[0] as Record<string, unknown>) : null;
+  return rows[0] ? mapNfe(rows[0] as Record<string, unknown>) : null;
 }
 
-export async function getNfceRaw(companyId: string, id: string) {
+export async function getNfeRaw(companyId: string, id: string) {
   const { rows } = await query(
-    `SELECT * FROM nfce WHERE id = $1 AND company_id = $2
-       AND COALESCE(modelo, '65') = '65' LIMIT 1`,
+    `SELECT * FROM nfce WHERE id = $1 AND company_id = $2 AND modelo = '55' LIMIT 1`,
     [id, companyId],
   );
   return (rows[0] as Record<string, unknown>) || null;
 }
 
-/** DANFE HTML com QR embutido (atualiza notas antigas na primeira reimpressão). */
-export async function getDanfeHtml(
+export async function getNfeBySale(companyId: string, saleId: string) {
+  const { rows } = await query(
+    `SELECT * FROM nfce WHERE company_id = $1 AND sale_id = $2 AND modelo = '55'
+     ORDER BY created_at DESC`,
+    [companyId, saleId],
+  );
+  return rows.map((r) => mapNfe(r as Record<string, unknown>));
+}
+
+export async function getNfeDanfeHtml(
   companyId: string,
   id: string,
 ): Promise<{ html: string; status: string; chaveAcesso: string | null } | null> {
-  const raw = await getNfceRaw(companyId, id);
+  const raw = await getNfeRaw(companyId, id);
   if (!raw) return null;
   const stored = raw.danfe_html != null ? String(raw.danfe_html) : null;
   if (!stored) return null;
-
-  const qrUrl = raw.qr_code_url != null ? String(raw.qr_code_url) : null;
-  const { html, updated } = await ensureDanfeQrEmbedded(stored, qrUrl);
-
-  if (updated && html !== stored) {
-    try {
-      await query(
-        `UPDATE nfce SET danfe_html = $1, updated_at = now() WHERE id = $2 AND company_id = $3`,
-        [html, id, companyId],
-      );
-    } catch (err) {
-      console.warn('[nfce] não foi possível persistir DANFE com QR:', err);
-    }
-  }
-
   return {
-    html,
+    html: stored,
     status: String(raw.status || ''),
     chaveAcesso: raw.chave_acesso != null ? String(raw.chave_acesso) : null,
   };
 }
 
-export async function listNfce(
+export async function listNfe(
   companyId: string,
   opts: { limit?: number; from?: string | null; to?: string | null; status?: string | null } = {},
 ) {
   const limit = Math.min(Math.max(Number(opts.limit) || 50, 1), 200);
   const params: unknown[] = [companyId];
-  let where = `WHERE company_id = $1 AND COALESCE(modelo, '65') = '65'`;
+  let where = `WHERE company_id = $1 AND modelo = '55'`;
   if (opts.from) {
     params.push(opts.from);
     where += ` AND COALESCE(data_emissao, created_at) >= $${params.length}::timestamptz`;
   }
   if (opts.to) {
     params.push(opts.to);
-    where += ` AND COALESCE(data_emissao, created_at) < $${params.length}::timestamptz`;
+    where += ` AND COALESCE(data_emissao, created_at) <= $${params.length}::timestamptz`;
   }
   if (opts.status) {
     params.push(opts.status);
@@ -175,131 +170,26 @@ export async function listNfce(
     `SELECT * FROM nfce ${where} ORDER BY COALESCE(data_emissao, created_at) DESC LIMIT $${params.length}`,
     params,
   );
-  return rows.map((r) => mapNfce(r as Record<string, unknown>));
+  return rows.map((r) => mapNfe(r as Record<string, unknown>));
 }
 
-export async function getNfceBySale(companyId: string, saleId: string) {
-  const { rows } = await query(
-    `SELECT * FROM nfce WHERE company_id = $1 AND sale_id = $2
-       AND COALESCE(modelo, '65') = '65'
-     ORDER BY created_at DESC`,
-    [companyId, saleId],
-  );
-  return rows.map((r) => mapNfce(r as Record<string, unknown>));
-}
-
-/** Vendas do período sem NFC-e AUTHORIZED (pendentes de emissão / reemissão). */
-export async function listPendingNfceSales(
-  companyId: string,
-  opts: {
-    from: string;
-    to: string;
-    limit?: number;
-    /** requested = marcadas para NFC-e ou com tentativa falha; all = qualquer venda sem autorizada */
-    mode?: 'requested' | 'all';
-  },
-) {
-  const limit = Math.min(Math.max(Number(opts.limit) || 100, 1), 300);
-  const mode = opts.mode === 'all' ? 'all' : 'requested';
-  const modeFilter =
-    mode === 'all'
-      ? 'TRUE'
-      : `(
-          COALESCE(s.emit_nfce, false) = true
-          OR COALESCE((s.payment_details->>'emitNfce')::boolean, false) = true
-          OR EXISTS (
-            SELECT 1 FROM nfce n
-            WHERE n.sale_id = s.id AND n.company_id = s.company_id
-              AND COALESCE(n.modelo, '65') = '65'
-              AND n.status <> 'AUTHORIZED' AND n.status <> 'CANCELLED'
-          )
-        )`;
-
-  const { rows } = await query(
-    `SELECT
-       s.id,
-       s.total,
-       s.payment_method,
-       s.timestamp,
-       s.emit_nfce,
-       s.payment_details,
-       s.customer_id,
-       c.name AS customer_name,
-       (
-         SELECT n.status FROM nfce n
-         WHERE n.sale_id = s.id AND n.company_id = s.company_id
-           AND COALESCE(n.modelo, '65') = '65'
-         ORDER BY n.created_at DESC LIMIT 1
-       ) AS last_nfce_status,
-       (
-         SELECT n.id FROM nfce n
-         WHERE n.sale_id = s.id AND n.company_id = s.company_id
-           AND COALESCE(n.modelo, '65') = '65'
-         ORDER BY n.created_at DESC LIMIT 1
-       ) AS last_nfce_id,
-       (
-         SELECT n.motivo_status FROM nfce n
-         WHERE n.sale_id = s.id AND n.company_id = s.company_id
-           AND COALESCE(n.modelo, '65') = '65'
-         ORDER BY n.created_at DESC LIMIT 1
-       ) AS last_nfce_motivo
-     FROM sales s
-     LEFT JOIN customers c ON c.id = s.customer_id
-     WHERE s.company_id = $1
-       AND s.timestamp >= $2::timestamptz
-       AND s.timestamp < $3::timestamptz
-       AND NOT EXISTS (
-         SELECT 1 FROM nfce n
-         WHERE n.sale_id = s.id AND n.company_id = s.company_id AND n.status = 'AUTHORIZED'
-       )
-       AND ${modeFilter}
-     ORDER BY s.timestamp DESC
-     LIMIT $4`,
-    [companyId, opts.from, opts.to, limit],
-  );
-
-  return rows.map((r) => {
-    const row = r as Record<string, unknown>;
-    const pd = row.payment_details as Record<string, unknown> | null;
-    return {
-      saleId: String(row.id),
-      total: Number(row.total || 0),
-      paymentMethod: row.payment_method != null ? String(row.payment_method) : null,
-      timestamp: row.timestamp,
-      emitNfce:
-        row.emit_nfce === true ||
-        pd?.emitNfce === true ||
-        String(pd?.emitNfce || '').toLowerCase() === 'true',
-      customerId: row.customer_id != null ? String(row.customer_id) : null,
-      customerName: row.customer_name != null ? String(row.customer_name) : null,
-      lastNfceStatus: row.last_nfce_status != null ? String(row.last_nfce_status) : null,
-      lastNfceId: row.last_nfce_id != null ? String(row.last_nfce_id) : null,
-      lastNfceMotivo: row.last_nfce_motivo != null ? String(row.last_nfce_motivo) : null,
-    };
-  });
-}
-
-/**
- * Cria e autoriza NFC-e a partir de uma venda (idempotente por saleId).
- */
-export async function createAndAuthorizeFromSale(params: {
+export async function createAndAuthorizeNfeFromSale(params: {
   companyId: string;
   saleId: string;
-}): Promise<{ nfce: ReturnType<typeof mapNfce>; message: string }> {
-  const companyId = params.companyId;
-  const saleId = params.saleId;
-  const idempotencyKey = `${companyId}:${saleId}`;
+}): Promise<{ nfe: ReturnType<typeof mapNfe>; message: string }> {
+  const { companyId, saleId } = params;
+  const idempotencyKey = `${companyId}:${saleId}:nfe55`;
 
-  // Já autorizada?
   const { rows: existingAuth } = await query(
     `SELECT * FROM nfce WHERE company_id = $1 AND sale_id = $2 AND status = 'AUTHORIZED' LIMIT 1`,
     [companyId, saleId],
   );
   if (existingAuth[0]) {
-    return {
-      nfce: mapNfce(existingAuth[0] as Record<string, unknown>),
-      message: 'NFC-e já autorizada para esta venda',
-    };
+    const row = existingAuth[0] as Record<string, unknown>;
+    if (String(row.modelo) === '55') {
+      return { nfe: mapNfe(row), message: 'NF-e já autorizada para esta venda' };
+    }
+    throw new Error('Esta venda já possui NFC-e autorizada. Cancele-a antes de emitir NF-e.');
   }
 
   const { rows: saleRows } = await query(
@@ -311,24 +201,13 @@ export async function createAndAuthorizeFromSale(params: {
 
   const config = await getFiscalConfigRow(companyId);
   if (!config || !config.enabled) throw new Error('Módulo fiscal desabilitado');
-  if (config.ambiente === 'production') {
-    // Permitir produção apenas se env explicitamente liberar
-    if (process.env.FISCAL_ALLOW_PRODUCTION !== 'true') {
-      throw new Error(
-        'Emissão em produção bloqueada. Defina FISCAL_ALLOW_PRODUCTION=true após testes de homologação.',
-      );
-    }
+  if (config.ambiente === 'production' && process.env.FISCAL_ALLOW_PRODUCTION !== 'true') {
+    throw new Error(
+      'Emissão em produção bloqueada. Defina FISCAL_ALLOW_PRODUCTION=true após testes de homologação.',
+    );
   }
 
   const env = normalizeFiscalEnvironment(config.ambiente);
-  const endpoints = getSefazEndpoints(env);
-  // Development SEFAZ-AM: CSC experimental fixo (ignora CSC salvo — evita rejeição 464)
-  const configuredToken =
-    config.csc_token_encrypted != null ? decryptSecret(config.csc_token_encrypted) : '';
-  const { cscId, cscToken } = resolveCscForEnvironment(env, {
-    cscId: config.csc_id,
-    cscToken: configuredToken,
-  });
 
   let details: Record<string, unknown> = {};
   try {
@@ -353,18 +232,29 @@ export async function createAndAuthorizeFromSale(params: {
   }
   if (items.length === 0) throw new Error('Venda sem itens');
 
-  // Destinatário
-  let dest: {
-    documentDigits: string;
-    documentType: 'cpf' | 'cnpj';
-    name: string;
-  } | null = null;
   const customerId =
     sale.customer_id != null
       ? String(sale.customer_id)
       : details.customerId
         ? String(details.customerId)
         : null;
+
+  let dest: {
+    documentDigits: string;
+    documentType: 'cpf' | 'cnpj';
+    name: string;
+    address: {
+      logradouro: string;
+      numero: string;
+      complemento?: string | null;
+      bairro: string;
+      municipio: string;
+      codigoMunicipio: string;
+      uf: string;
+      cep: string;
+    };
+  } | null = null;
+
   if (customerId) {
     const { rows: custRows } = await query(
       `SELECT * FROM customers WHERE id = $1 AND company_id = $2 LIMIT 1`,
@@ -372,23 +262,46 @@ export async function createAndAuthorizeFromSale(params: {
     );
     const c = custRows[0] as Record<string, unknown> | undefined;
     if (c) {
+      const logradouro = String(c.logradouro || '').trim();
+      const municipio = String(c.municipio || '').trim();
+      const uf = String(c.uf || config.uf || 'AM').trim();
+      const cep = onlyDigits(String(c.cep || ''));
+      if (!logradouro || !municipio || cep.length !== 8) {
+        throw new Error(
+          'Cliente sem endereço completo (logradouro, município e CEP). Obrigatório para NF-e.',
+        );
+      }
       dest = {
         documentDigits: String(c.document_digits),
         documentType: c.document_type === 'cnpj' ? 'cnpj' : 'cpf',
         name: String(c.name),
+        address: {
+          logradouro,
+          numero: String(c.numero || 'S/N').trim() || 'S/N',
+          complemento: c.complemento != null ? String(c.complemento) : null,
+          bairro: String(c.bairro || 'CENTRO').trim() || 'CENTRO',
+          municipio,
+          codigoMunicipio:
+            onlyDigits(String(c.codigo_municipio || '')) ||
+            onlyDigits(String(config.codigo_municipio || '')) ||
+            '1302603',
+          uf: uf.slice(0, 2).toUpperCase(),
+          cep,
+        },
       };
     }
-  } else if (details.customerDocument && details.customerName) {
-    const digits = onlyDigits(String(details.customerDocument));
-    dest = {
-      documentDigits: digits,
-      documentType: digits.length === 14 ? 'cnpj' : 'cpf',
-      name: String(details.customerName),
-    };
   }
 
-  const serie = Number(config.serie_nfce) || 1;
-  const numero = await reserveNumber(companyId, serie);
+  if (!dest) {
+    throw new Error('NF-e exige cliente cadastrado com CPF/CNPJ e endereço completo');
+  }
+
+  await ensureNfeNumberColumns();
+  const serie =
+    Number((config as { serie_nfe?: number }).serie_nfe) ||
+    Number((config as { serieNfe?: number }).serieNfe) ||
+    1;
+  const numero = await reserveNfeNumber(companyId, serie);
   const emissionDate = new Date();
   const accessKey = buildAccessKey({
     uf: config.uf || 'AM',
@@ -396,9 +309,9 @@ export async function createAndAuthorizeFromSale(params: {
     cnpj: config.cnpj,
     serie,
     numero,
+    modelo: '55',
   });
 
-  // Enriquecer itens com NCM/CFOP do produto
   const builtItems = [];
   for (let i = 0; i < items.length; i++) {
     const it = items[i];
@@ -463,7 +376,7 @@ export async function createAndAuthorizeFromSale(params: {
     csrt: respTecCsrt,
   });
 
-  const xmlOriginal = buildNfceXml({
+  const xmlOriginal = buildNfeXml({
     accessKey,
     numero,
     serie,
@@ -489,42 +402,27 @@ export async function createAndAuthorizeFromSale(params: {
     items: builtItems,
     paymentMethod,
     total,
-    cscId,
-    cscToken,
-    qrCodeBaseUrl: endpoints.qrCode,
     respTec,
   });
 
   const cert = await loadCompanyCertificate(companyId);
   const signedInner = signXmlEnveloped(xmlOriginal, `NFe${accessKey}`, cert);
-  let signedXml =
+  const signedXml =
     `<?xml version="1.0" encoding="UTF-8"?>` +
     (signedInner.startsWith('<NFe')
       ? signedInner
       : `<NFe xmlns="http://www.portalfiscal.inf.br/nfe">${signedInner}</NFe>`);
 
-  const qrCodeUrl = buildQrCodeUrl({
-    accessKey,
-    ambiente: tpAmb(env),
-    cscId,
-    cscToken,
-    baseUrl: endpoints.qrCode,
-  });
-
-  // NFC-e (mod 65): infNFeSupl com qrCode/urlChave é obrigatório no schema
-  signedXml = attachInfNFeSupl(signedXml, qrCodeUrl, endpoints.urlChave);
-
-  // Insert draft (idempotente por company_id + idempotency_key)
-  let nfceRow: Record<string, unknown> | undefined;
+  let nfeRow: Record<string, unknown> | undefined;
   let isNew = false;
   try {
-    const { rows: nfceRows } = await query(
+    const { rows: nfeRows } = await query(
       `INSERT INTO nfce (
          company_id, sale_id, customer_id, chave_acesso, numero, serie, modelo,
          ambiente, tipo_emissao, status, xml_original, xml_assinado, qr_code_url,
          idempotency_key, data_emissao
        ) VALUES (
-         $1,$2,$3,$4,$5,$6,'65',$7,1,'SIGNED',$8,$9,$10,$11,$12
+         $1,$2,$3,$4,$5,$6,'55',$7,1,'SIGNED',$8,$9,NULL,$10,$11
        )
        RETURNING *`,
       [
@@ -537,12 +435,11 @@ export async function createAndAuthorizeFromSale(params: {
         env,
         xmlOriginal,
         signedXml,
-        qrCodeUrl,
         idempotencyKey,
         emissionDate.toISOString(),
       ],
     );
-    nfceRow = nfceRows[0] as Record<string, unknown>;
+    nfeRow = nfeRows[0] as Record<string, unknown>;
     isNew = true;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -551,43 +448,34 @@ export async function createAndAuthorizeFromSale(params: {
       `SELECT * FROM nfce WHERE company_id = $1 AND idempotency_key = $2 LIMIT 1`,
       [companyId, idempotencyKey],
     );
-    nfceRow = rows[0] as Record<string, unknown>;
-    if (nfceRow && String(nfceRow.status) === 'AUTHORIZED') {
-      return {
-        nfce: mapNfce(nfceRow),
-        message: 'NFC-e já autorizada para esta venda',
-      };
+    nfeRow = rows[0] as Record<string, unknown>;
+    if (nfeRow && String(nfeRow.status) === 'AUTHORIZED') {
+      return { nfe: mapNfe(nfeRow), message: 'NF-e já autorizada para esta venda' };
     }
   }
-  if (!nfceRow) throw new Error('Falha ao persistir NFC-e');
+  if (!nfeRow) throw new Error('Falha ao persistir NF-e');
 
-  const nfceId = String(nfceRow.id);
-  const prevStatus = String(nfceRow.status || '');
-  // Reemissão após REJECTED/ERROR: usa XML novo (corrige schema). Senão reusa o assinado.
+  const nfeId = String(nfeRow.id);
+  const prevStatus = String(nfeRow.status || '');
   const reuseXml =
     !isNew &&
     prevStatus !== 'REJECTED' &&
     prevStatus !== 'ERROR' &&
     prevStatus !== 'DRAFT' &&
-    nfceRow.xml_assinado != null;
-  let signedXmlToSend = reuseXml ? String(nfceRow.xml_assinado) : signedXml;
+    nfeRow.xml_assinado != null;
+  let signedXmlToSend = reuseXml ? String(nfeRow.xml_assinado) : signedXml;
   const accessKeyToUse =
-    (nfceRow.chave_acesso != null ? String(nfceRow.chave_acesso) : null) || accessKey;
-  const qrCodeUrlToUse =
-    (nfceRow.qr_code_url != null ? String(nfceRow.qr_code_url) : null) || qrCodeUrl;
-
-  // Garante infNFeSupl mesmo em XML antigo persistido sem o bloco
-  signedXmlToSend = attachInfNFeSupl(signedXmlToSend, qrCodeUrlToUse, endpoints.urlChave);
+    (nfeRow.chave_acesso != null ? String(nfeRow.chave_acesso) : null) || accessKey;
 
   if (!isNew && !reuseXml) {
     await query(
       `UPDATE nfce SET
-         xml_original = $1, xml_assinado = $2, qr_code_url = $3,
-         chave_acesso = $4, numero = $5, serie = $6,
+         xml_original = $1, xml_assinado = $2,
+         chave_acesso = $3, numero = $4, serie = $5, modelo = '55',
          status = 'SIGNED', motivo_status = NULL, codigo_status = NULL,
          updated_at = now()
-       WHERE id = $7`,
-      [xmlOriginal, signedXmlToSend, qrCodeUrlToUse, accessKey, numero, serie, nfceId],
+       WHERE id = $6`,
+      [xmlOriginal, signedXmlToSend, accessKey, numero, serie, nfeId],
     );
   }
 
@@ -599,7 +487,7 @@ export async function createAndAuthorizeFromSale(params: {
            unidade, quantity, unit_price, total
          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
         [
-          nfceId,
+          nfeId,
           companyId,
           it.itemNumber,
           it.description,
@@ -614,24 +502,17 @@ export async function createAndAuthorizeFromSale(params: {
         ],
       );
     }
-
-    await query(
-      `INSERT INTO nfce_payment (nfce_id, company_id, t_pag, v_pag, description)
-       VALUES ($1,$2,$3,$4,$5)`,
-      [nfceId, companyId, paymentMethod, total, paymentMethod],
-    );
   }
 
-  // Envio SEFAZ
-  const client = new SefazAmClient(companyId, env);
+  const client = new SefazAmClient(companyId, env, '55');
   const started = Date.now();
   try {
-    await query(`UPDATE nfce SET status = 'SENT', updated_at = now() WHERE id = $1`, [nfceId]);
-    const sefazRes = await client.authorizeNfce(signedXmlToSend);
+    await query(`UPDATE nfce SET status = 'SENT', updated_at = now() WHERE id = $1`, [nfeId]);
+    const sefazRes = await client.authorizeNfe(signedXmlToSend);
     await writeFiscalLog({
       companyId,
-      nfceId,
-      operation: 'AUTHORIZATION',
+      nfceId: nfeId,
+      operation: 'NFE_AUTHORIZATION',
       requestXml: signedXmlToSend.slice(0, 50000),
       responseXml: sefazRes.rawXml.slice(0, 50000),
       sefazStatusCode: sefazRes.statusCode,
@@ -643,10 +524,10 @@ export async function createAndAuthorizeFromSale(params: {
       const authorizedXml = sefazRes.protNFeXml
         ? wrapNFeProc(signedXmlToSend, sefazRes.protNFeXml)
         : signedXmlToSend;
-      const danfe = await buildDanfeHtml({
+      const danfe = await buildNfeDanfeHtml({
         accessKey: accessKeyToUse,
-        numero: Number(nfceRow.numero) || numero,
-        serie: Number(nfceRow.serie) || serie,
+        numero: Number(nfeRow.numero) || numero,
+        serie: Number(nfeRow.serie) || serie,
         protocolo: sefazRes.protocol || '',
         emitName: config.razao_social,
         emitFantasia: config.nome_fantasia,
@@ -661,14 +542,11 @@ export async function createAndAuthorizeFromSale(params: {
           uf: config.uf,
           cep: config.cep,
         }),
-        emitPhone: (config as { telefone?: string | null }).telefone ?? null,
-        emitEmail: (config as { email?: string | null }).email ?? null,
-        emitLogoUrl: (config as { logo_url?: string | null }).logo_url ?? null,
-        destName: dest?.name || 'CONSUMIDOR NÃO IDENTIFICADO',
-        destDoc: dest?.documentDigits || '',
+        destName: dest.name,
+        destDoc: dest.documentDigits,
+        destAddressLines: buildEmitAddressLines(dest.address),
         items: builtItems,
         total,
-        qrCodeUrl: qrCodeUrlToUse,
         ambiente: env,
         paymentMethod,
         authorizedAt: sefazRes.authorizationDate || new Date().toISOString(),
@@ -693,22 +571,21 @@ export async function createAndAuthorizeFromSale(params: {
           authorizedXml,
           sefazRes.rawXml,
           danfe,
-          nfceId,
+          nfeId,
         ],
       );
 
-      // Marca venda
       try {
-        await query(`UPDATE sales SET emit_nfce = true WHERE id = $1 AND company_id = $2`, [
-          saleId,
-          companyId,
-        ]);
+        await query(
+          `UPDATE sales SET emit_nfe = true WHERE id = $1 AND company_id = $2`,
+          [saleId, companyId],
+        );
       } catch {
-        /* coluna opcional */
+        /* coluna opcional até a migration */
       }
 
-      const updated = await getNfceById(companyId, nfceId);
-      return { nfce: updated!, message: 'NFC-e autorizada' };
+      const updated = await getNfeById(companyId, nfeId);
+      return { nfe: updated!, message: 'NF-e autorizada' };
     }
 
     await query(
@@ -719,41 +596,30 @@ export async function createAndAuthorizeFromSale(params: {
          xml_resposta = $3,
          updated_at = now()
        WHERE id = $4`,
-      [sefazRes.statusCode, sefazRes.statusMessage, sefazRes.rawXml, nfceId],
+      [sefazRes.statusCode, sefazRes.statusMessage, sefazRes.rawXml, nfeId],
     );
-
-    const updated = await getNfceById(companyId, nfceId);
-    let message = `NFC-e rejeitada: ${sefazRes.statusCode} — ${sefazRes.statusMessage}`;
-    // 464: hash do QR ≠ SEFAZ — quase sempre CSC/ID de homologação incorreto
-    if (
-      sefazRes.statusCode === '464' ||
-      /hash no qr-?code|hash.*qr/i.test(sefazRes.statusMessage || '')
-    ) {
-      message +=
-        '. Confira em Configurações → Fiscal o ID do CSC e o Token CSC de HOMOLOGAÇÃO do portal SEFAZ-AM (não use o CSC experimental 0123456789). Salve de novo o token e reemita.';
-    }
+    const updated = await getNfeById(companyId, nfeId);
     return {
-      nfce: updated!,
-      message,
+      nfe: updated!,
+      message: `NF-e rejeitada: ${sefazRes.statusCode} — ${sefazRes.statusMessage}`,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     await writeFiscalLog({
       companyId,
-      nfceId,
-      operation: 'AUTHORIZATION',
+      nfceId: nfeId,
+      operation: 'NFE_AUTHORIZATION',
       errorMessage: message,
       durationMs: Date.now() - started,
     });
     await query(
       `UPDATE nfce SET status = 'ERROR', motivo_status = $1, updated_at = now() WHERE id = $2`,
-      [message.slice(0, 500), nfceId],
+      [message.slice(0, 500), nfeId],
     );
 
-    // Timeout → consultar
     if (/timeout|ECONNRESET|ENOTFOUND|socket/i.test(message)) {
       try {
-        const consult = await client.consultNfce(accessKeyToUse);
+        const consult = await client.consultNfe(accessKeyToUse);
         if (consult.success) {
           await query(
             `UPDATE nfce SET status = 'AUTHORIZED', protocolo = $1, codigo_status = $2,
@@ -764,35 +630,35 @@ export async function createAndAuthorizeFromSale(params: {
               consult.statusCode,
               consult.statusMessage,
               consult.rawXml,
-              nfceId,
+              nfeId,
             ],
           );
-          const updated = await getNfceById(companyId, nfceId);
-          return { nfce: updated!, message: 'NFC-e autorizada (após consulta)' };
+          const updated = await getNfeById(companyId, nfeId);
+          return { nfe: updated!, message: 'NF-e autorizada (após consulta)' };
         }
       } catch {
         /* ignore */
       }
     }
 
-    const updated = await getNfceById(companyId, nfceId);
-    return { nfce: updated!, message: `Erro na emissão: ${message}` };
+    const updated = await getNfeById(companyId, nfeId);
+    return { nfe: updated!, message: `Erro na emissão: ${message}` };
   }
 }
 
-export async function cancelNfce(params: {
+export async function cancelNfe(params: {
   companyId: string;
-  nfceId: string;
+  nfeId: string;
   justification: string;
 }) {
   const justification = params.justification.trim();
   if (justification.length < 15) {
     throw new Error('Justificativa deve ter no mínimo 15 caracteres');
   }
-  const raw = await getNfceRaw(params.companyId, params.nfceId);
-  if (!raw) throw new Error('NFC-e não encontrada');
+  const raw = await getNfeRaw(params.companyId, params.nfeId);
+  if (!raw) throw new Error('NF-e não encontrada');
   if (String(raw.status) !== 'AUTHORIZED') {
-    throw new Error('Somente NFC-e autorizada pode ser cancelada');
+    throw new Error('Somente NF-e autorizada pode ser cancelada');
   }
   const accessKey = String(raw.chave_acesso);
   const config = await getFiscalConfigRow(params.companyId);
@@ -827,20 +693,22 @@ export async function cancelNfce(params: {
   const signed = signXmlEnveloped(eventoXml, id, cert);
   const signedFull =
     `<?xml version="1.0" encoding="UTF-8"?>` +
-    (signed.includes('<evento') ? signed : `<evento xmlns="http://www.portalfiscal.inf.br/nfe" versao="1.00">${signed}</evento>`);
+    (signed.includes('<evento')
+      ? signed
+      : `<evento xmlns="http://www.portalfiscal.inf.br/nfe" versao="1.00">${signed}</evento>`);
 
   await query(
     `UPDATE nfce SET status = 'CANCEL_REQUESTED', updated_at = now() WHERE id = $1`,
-    [params.nfceId],
+    [params.nfeId],
   );
 
-  const client = new SefazAmClient(params.companyId, env);
+  const client = new SefazAmClient(params.companyId, env, '55');
   const started = Date.now();
   const res = await client.sendEvent(signedFull);
   await writeFiscalLog({
     companyId: params.companyId,
-    nfceId: params.nfceId,
-    operation: 'CANCELLATION',
+    nfceId: params.nfeId,
+    operation: 'NFE_CANCELLATION',
     requestXml: signedFull.slice(0, 50000),
     responseXml: res.rawXml.slice(0, 50000),
     sefazStatusCode: res.statusCode,
@@ -853,7 +721,7 @@ export async function cancelNfce(params: {
        nfce_id, company_id, tipo_evento, sequencia, xml_evento, xml_retorno, protocolo, status, justification
      ) VALUES ($1,$2,'110111',$3,$4,$5,$6,$7,$8)`,
     [
-      params.nfceId,
+      params.nfeId,
       params.companyId,
       nSeq,
       signedFull,
@@ -868,15 +736,15 @@ export async function cancelNfce(params: {
     await query(
       `UPDATE nfce SET status = 'CANCELLED', codigo_status = $1, motivo_status = $2, updated_at = now()
        WHERE id = $3`,
-      [res.statusCode, res.statusMessage, params.nfceId],
+      [res.statusCode, res.statusMessage, params.nfeId],
     );
   } else {
     await query(
       `UPDATE nfce SET status = 'AUTHORIZED', codigo_status = $1, motivo_status = $2, updated_at = now()
        WHERE id = $3`,
-      [res.statusCode, res.statusMessage, params.nfceId],
+      [res.statusCode, res.statusMessage, params.nfeId],
     );
   }
 
-  return getNfceById(params.companyId, params.nfceId);
+  return getNfeById(params.companyId, params.nfeId);
 }

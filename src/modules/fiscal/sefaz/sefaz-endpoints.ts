@@ -89,6 +89,40 @@ export function getSefazEndpoints(env: FiscalEnvironment | string): SefazEndpoin
   return sefazEnvironmentConfig[normalizeFiscalEnvironment(env)];
 }
 
+/**
+ * Endpoints oficiais NF-e SEFAZ-AM (modelo 55, XML 4.00).
+ * Distintos dos webservices NFC-e (homnfce / nfce).
+ */
+export const sefazNfeHomologation: SefazEndpointSet = {
+  authorization: 'https://homnfe.sefaz.am.gov.br/services2/services/NfeAutorizacao4',
+  authorizationReturn: 'https://homnfe.sefaz.am.gov.br/services2/services/NfeRetAutorizacao4',
+  consultation: 'https://homnfe.sefaz.am.gov.br/services2/services/NfeConsulta4',
+  status: 'https://homnfe.sefaz.am.gov.br/services2/services/NfeStatusServico4',
+  inutilization: 'https://homnfe.sefaz.am.gov.br/services2/services/NfeInutilizacao4',
+  event: 'https://homnfe.sefaz.am.gov.br/services2/services/RecepcaoEvento4',
+  qrCode: 'https://sistemas.sefaz.am.gov.br/nfceweb-hom/consultarNFCe.jsp?',
+  urlChave: 'https://sistemas.sefaz.am.gov.br/nfceweb-hom/consultarNFCe.jsp',
+  soap: soapV4,
+};
+
+export const sefazNfeProduction: SefazEndpointSet = {
+  authorization: 'https://nfe.sefaz.am.gov.br/services2/services/NfeAutorizacao4',
+  authorizationReturn: 'https://nfe.sefaz.am.gov.br/services2/services/NfeRetAutorizacao4',
+  consultation: 'https://nfe.sefaz.am.gov.br/services2/services/NfeConsulta4',
+  status: 'https://nfe.sefaz.am.gov.br/services2/services/NfeStatusServico4',
+  inutilization: 'https://nfe.sefaz.am.gov.br/services2/services/NfeInutilizacao4',
+  event: 'https://nfe.sefaz.am.gov.br/services2/services/RecepcaoEvento4',
+  qrCode: 'https://sistemas.sefaz.am.gov.br/nfceweb/consultarNFCe.jsp?',
+  urlChave: 'https://sistemas.sefaz.am.gov.br/nfceweb/consultarNFCe.jsp',
+  soap: soapV4,
+};
+
+export function getSefazNfeEndpoints(env: FiscalEnvironment | string): SefazEndpointSet {
+  return normalizeFiscalEnvironment(env) === 'production'
+    ? sefazNfeProduction
+    : sefazNfeHomologation;
+}
+
 /** CSC experimental do sandbox antigo — não usar em homologação/produção. */
 export const EXPERIMENTAL_CSC = {
   id: '000001',

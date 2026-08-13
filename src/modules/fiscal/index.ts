@@ -21,6 +21,15 @@ import {
   listPendingNfceSales,
 } from './nfce/create-nfce.service.js';
 import {
+  cancelNfe,
+  createAndAuthorizeNfeFromSale,
+  getNfeById,
+  getNfeBySale,
+  getNfeRaw,
+  getNfeDanfeHtml,
+  listNfe,
+} from './nfe/create-nfe.service.js';
+import {
   getInboundPreview,
   ignoreInboundNfe,
   listInboundNfe,
@@ -46,6 +55,13 @@ export {
   getDanfeHtml,
   listNfce,
   listPendingNfceSales,
+  cancelNfe,
+  createAndAuthorizeNfeFromSale,
+  getNfeById,
+  getNfeBySale,
+  getNfeRaw,
+  getNfeDanfeHtml,
+  listNfe,
   syncInboundNfe,
   listInboundNfe,
   getInboundPreview,

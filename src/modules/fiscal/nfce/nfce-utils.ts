@@ -40,6 +40,8 @@ export function buildAccessKey(params: {
   cnpj: string;
   serie: number;
   numero: number;
+  /** Modelo do documento: 65=NFC-e, 55=NF-e. Default 65. */
+  modelo?: '55' | '65' | string;
   tipoEmissao?: number;
   cnf?: string;
 }): string {
@@ -47,7 +49,7 @@ export function buildAccessKey(params: {
   const yy = String(params.emissionDate.getFullYear()).slice(-2);
   const mm = padLeft(params.emissionDate.getMonth() + 1, 2);
   const cnpj = padLeft(onlyDigits(params.cnpj), 14);
-  const mod = '65';
+  const mod = String(params.modelo || '65').replace(/\D/g, '').padStart(2, '0').slice(-2) || '65';
   const serie = padLeft(params.serie, 3);
   const nNF = padLeft(params.numero, 9);
   const tpEmis = String(params.tipoEmissao ?? 1);

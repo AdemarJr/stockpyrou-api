@@ -1,6 +1,11 @@
 import https from 'node:https';
 import { XMLParser } from 'fast-xml-parser';
-import { getSefazEndpoints, type FiscalEnvironment } from '../sefaz/sefaz-endpoints.js';
+import {
+  getSefazEndpoints,
+  getSefazNfeEndpoints,
+  type FiscalEnvironment,
+  type SefazEndpointSet,
+} from '../sefaz/sefaz-endpoints.js';
 import { getSefazHttpsTlsOptions } from './sefaz-tls.js';
 
 export interface SefazNormalizedResponse {
@@ -194,10 +199,14 @@ export class SefazAmClient {
   constructor(
     private companyId: string,
     private environment: FiscalEnvironment,
+    /** 65 = NFC-e (default), 55 = NF-e */
+    private modelo: '55' | '65' = '65',
   ) {}
 
-  private endpoints() {
-    return getSefazEndpoints(this.environment);
+  private endpoints(): SefazEndpointSet {
+    return this.modelo === '55'
+      ? getSefazNfeEndpoints(this.environment)
+      : getSefazEndpoints(this.environment);
   }
 
   async checkStatus(cUF = '13'): Promise<SefazNormalizedResponse> {
@@ -218,7 +227,7 @@ export class SefazAmClient {
     return parseAuthorizationResponse(res.body);
   }
 
-  async authorizeNfce(signedXml: string): Promise<SefazNormalizedResponse> {
+  private async authorizeSigned(signedXml: string): Promise<SefazNormalizedResponse> {
     const idLote = String(Date.now()).slice(-15);
     const nfeClean = signedXml.replace(/^<\?xml[^?]*\?>\s*/i, '');
     const envi =
@@ -238,11 +247,21 @@ export class SefazAmClient {
     if (!res.body || res.status >= 500) {
       throw new Error(
         `SEFAZ não respondeu (${res.status}). Ambiente=${this.environment}. ` +
-          'Verifique certificado, CSC e conectividade.',
+          (this.modelo === '55'
+            ? 'Verifique certificado e conectividade (NF-e).'
+            : 'Verifique certificado, CSC e conectividade.'),
       );
     }
 
     return parseAuthorizationResponse(res.body);
+  }
+
+  async authorizeNfce(signedXml: string): Promise<SefazNormalizedResponse> {
+    return this.authorizeSigned(signedXml);
+  }
+
+  async authorizeNfe(signedXml: string): Promise<SefazNormalizedResponse> {
+    return this.authorizeSigned(signedXml);
   }
 
   async consultNfce(accessKey: string): Promise<SefazNormalizedResponse> {
@@ -261,6 +280,10 @@ export class SefazAmClient {
       bodyInner: inner,
     });
     return parseAuthorizationResponse(res.body);
+  }
+
+  async consultNfe(accessKey: string): Promise<SefazNormalizedResponse> {
+    return this.consultNfce(accessKey);
   }
 
   async sendEvent(signedEventXml: string): Promise<SefazNormalizedResponse> {

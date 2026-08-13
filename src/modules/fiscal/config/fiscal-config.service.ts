@@ -27,6 +27,8 @@ export interface FiscalConfigRow {
   ambiente: FiscalEnvironment;
   serie_nfce: number;
   numero_nfce: number;
+  serie_nfe?: number;
+  numero_nfe?: number;
   csc_id: string | null;
   csc_token_encrypted: string | null;
   resp_tec_cnpj?: string | null;
@@ -62,6 +64,8 @@ export interface FiscalConfigPublic {
   ambiente: FiscalEnvironment;
   serieNfce: number;
   numeroNfce: number;
+  serieNfe: number;
+  numeroNfe: number;
   cscId: string | null;
   hasCscToken: boolean;
   cscTokenMasked: string | null;
@@ -97,6 +101,8 @@ export interface UpsertFiscalConfigInput {
   serieNfce?: number;
   /** Só avança número manualmente com cuidado — emissão reserva automaticamente depois. */
   numeroNfce?: number;
+  serieNfe?: number;
+  numeroNfe?: number;
   cscId?: string | null;
   /** Se omitido/null/vazio, mantém o CSC já salvo. */
   cscToken?: string | null;
@@ -134,6 +140,8 @@ function mapPublic(row: FiscalConfigRow, cscPlainHint?: string | null): FiscalCo
     ambiente: normalizeFiscalEnvironment(row.ambiente),
     serieNfce: Number(row.serie_nfce) || 1,
     numeroNfce: Number(row.numero_nfce) || 0,
+    serieNfe: Number(row.serie_nfe) || 1,
+    numeroNfe: Number(row.numero_nfe) || 0,
     cscId: row.csc_id != null ? String(row.csc_id) : null,
     hasCscToken: !!row.csc_token_encrypted,
     cscTokenMasked: maskToken(cscPlainHint) ?? (row.csc_token_encrypted ? '********' : null),
@@ -162,17 +170,43 @@ async function ensureRespTecColumns(): Promise<boolean> {
         ADD COLUMN IF NOT EXISTS resp_tec_email text NULL,
         ADD COLUMN IF NOT EXISTS resp_tec_fone text NULL,
         ADD COLUMN IF NOT EXISTS resp_tec_id_csrt text NULL,
-        ADD COLUMN IF NOT EXISTS resp_tec_csrt_encrypted text NULL
+        ADD COLUMN IF NOT EXISTS resp_tec_csrt_encrypted text NULL,
+        ADD COLUMN IF NOT EXISTS serie_nfe integer NOT NULL DEFAULT 1,
+        ADD COLUMN IF NOT EXISTS numero_nfe integer NOT NULL DEFAULT 0
     `);
     respTecColumnsReady = true;
     return true;
   } catch (err) {
     respTecColumnsReady = false;
     console.warn(
-      '[fiscal] Não foi possível criar colunas resp_tec_*:',
+      '[fiscal] Não foi possível criar colunas resp_tec_* / serie_nfe:',
       err instanceof Error ? err.message : err,
     );
     return false;
+  }
+}
+
+async function persistNfeSeries(
+  companyId: string,
+  input: UpsertFiscalConfigInput,
+): Promise<void> {
+  if (input.serieNfe === undefined && input.numeroNfe === undefined) return;
+  await ensureRespTecColumns();
+  const serie =
+    input.serieNfe !== undefined ? Math.max(1, Number(input.serieNfe) || 1) : null;
+  const numero =
+    input.numeroNfe !== undefined ? Math.max(0, Number(input.numeroNfe) || 0) : null;
+  try {
+    await query(
+      `UPDATE fiscal_config SET
+         serie_nfe = COALESCE($1, serie_nfe),
+         numero_nfe = COALESCE($2, numero_nfe),
+         updated_at = now()
+       WHERE company_id = $3`,
+      [serie, numero, companyId],
+    );
+  } catch (err) {
+    console.warn('[fiscal] persistNfeSeries:', err instanceof Error ? err.message : err);
   }
 }
 
@@ -358,7 +392,9 @@ export async function saveFiscalConfig(
         params,
       );
       const updated = await persistRespTec(companyId, input);
-      return mapPublic((updated ?? rows[0]) as FiscalConfigRow, cscPlainHint);
+      await persistNfeSeries(companyId, input);
+      const row = (updated ?? rows[0]) as FiscalConfigRow;
+      return mapPublic((await getFiscalConfigRow(companyId)) ?? row, cscPlainHint);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (!/telefone|logo_url|column/i.test(msg)) throw err;
@@ -398,7 +434,9 @@ export async function saveFiscalConfig(
         legacy,
       );
       const updated = await persistRespTec(companyId, input);
-      return mapPublic((updated ?? rows[0]) as FiscalConfigRow, cscPlainHint);
+      await persistNfeSeries(companyId, input);
+      const row = (updated ?? rows[0]) as FiscalConfigRow;
+      return mapPublic((await getFiscalConfigRow(companyId)) ?? row, cscPlainHint);
     }
   }
 
@@ -415,7 +453,9 @@ export async function saveFiscalConfig(
       params,
     );
     const updated = await persistRespTec(companyId, input);
-    return mapPublic((updated ?? rows[0]) as FiscalConfigRow, cscPlainHint);
+    await persistNfeSeries(companyId, input);
+    const row = (updated ?? rows[0]) as FiscalConfigRow;
+    return mapPublic((await getFiscalConfigRow(companyId)) ?? row, cscPlainHint);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (!/telefone|logo_url|column/i.test(msg)) throw err;
@@ -453,7 +493,9 @@ export async function saveFiscalConfig(
       legacy,
     );
     const updated = await persistRespTec(companyId, input);
-    return mapPublic((updated ?? rows[0]) as FiscalConfigRow, cscPlainHint);
+    await persistNfeSeries(companyId, input);
+    const row = (updated ?? rows[0]) as FiscalConfigRow;
+    return mapPublic((await getFiscalConfigRow(companyId)) ?? row, cscPlainHint);
   }
 }
 

@@ -24,6 +24,13 @@ import {
   markInboundImported,
   ignoreInboundNfe,
   resetInboundNsu,
+  cancelNfe,
+  createAndAuthorizeNfeFromSale,
+  getNfeById,
+  getNfeBySale,
+  getNfeRaw,
+  getNfeDanfeHtml,
+  listNfe,
   type FiscalEnvironment,
 } from '../modules/fiscal/index.js';
 
@@ -111,6 +118,8 @@ fiscal.put('/config', async (c) => {
         : undefined,
     serieNfce: body.serieNfce != null ? Number(body.serieNfce) : undefined,
     numeroNfce: body.numeroNfce != null ? Number(body.numeroNfce) : undefined,
+    serieNfe: body.serieNfe != null ? Number(body.serieNfe) : undefined,
+    numeroNfe: body.numeroNfe != null ? Number(body.numeroNfe) : undefined,
     cscId: body.cscId ?? body.csc_id ?? undefined,
     cscToken: body.cscToken ?? body.csc_token ?? undefined,
     respTecCnpj: body.respTecCnpj ?? body.resp_tec_cnpj ?? undefined,
@@ -478,6 +487,133 @@ fiscal.post('/nfce/:id/cancel', async (c) => {
       success: ok,
       message: ok ? 'NFC-e cancelada' : `Cancelamento não aceito: ${nfce?.motivoStatus || ''}`,
       nfce,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const status = /mínimo|somente|não encontrada/i.test(message) ? 400 : 500;
+    return c.json({ error: message }, status);
+  }
+});
+
+/** Lista NF-e de saída (modelo 55). */
+fiscal.get('/nfe', async (c) => {
+  const companyId = c.get('companyId');
+  const limit = Math.min(Number(c.req.query('limit') || 50), 200);
+  const from = c.req.query('from') || null;
+  const to = c.req.query('to') || null;
+  const status = c.req.query('status') || null;
+  try {
+    const items = await listNfe(companyId, { limit, from, to, status });
+    return c.json({ success: true, nfe: items });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (/relation .* does not exist/i.test(message)) {
+      return c.json({
+        success: true,
+        nfe: [],
+        needsMigration: true,
+        error: 'Execute scripts/add_nfce_emission.sql e scripts/add_nfe_emission.sql no banco',
+      });
+    }
+    return c.json({ error: message }, 500);
+  }
+});
+
+fiscal.get('/nfe/by-sale/:saleId', async (c) => {
+  const companyId = c.get('companyId');
+  try {
+    const items = await getNfeBySale(companyId, c.req.param('saleId'));
+    return c.json({ success: true, nfe: items });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return c.json({ error: message }, 500);
+  }
+});
+
+fiscal.get('/nfe/:id', async (c) => {
+  const companyId = c.get('companyId');
+  const nfe = await getNfeById(companyId, c.req.param('id'));
+  if (!nfe) return c.json({ error: 'NF-e não encontrada' }, 404);
+  return c.json({ success: true, nfe });
+});
+
+fiscal.get('/nfe/:id/danfe', async (c) => {
+  const companyId = c.get('companyId');
+  const danfe = await getNfeDanfeHtml(companyId, c.req.param('id'));
+  if (!danfe) return c.json({ error: 'DANFE ainda não disponível' }, 404);
+  return c.json({
+    success: true,
+    html: danfe.html,
+    status: danfe.status,
+    chaveAcesso: danfe.chaveAcesso,
+  });
+});
+
+fiscal.get('/nfe/:id/xml', async (c) => {
+  const companyId = c.get('companyId');
+  const raw = await getNfeRaw(companyId, c.req.param('id'));
+  if (!raw) return c.json({ error: 'NF-e não encontrada' }, 404);
+  const xml =
+    (raw.xml_autorizado != null ? String(raw.xml_autorizado) : null) ||
+    (raw.xml_assinado != null ? String(raw.xml_assinado) : null) ||
+    (raw.xml_original != null ? String(raw.xml_original) : null);
+  if (!xml) return c.json({ error: 'XML não disponível' }, 404);
+  return c.json({
+    success: true,
+    xml,
+    status: raw.status,
+    chaveAcesso: raw.chave_acesso,
+  });
+});
+
+/** Emite / autoriza NF-e a partir de uma venda. Body: { saleId } */
+fiscal.post('/nfe', async (c) => {
+  const companyId = c.get('companyId');
+  const body = await c.req.json().catch(() => ({}));
+  const saleId = String(body.saleId || body.sale_id || '').trim();
+  if (!saleId) return c.json({ error: 'saleId é obrigatório' }, 400);
+
+  try {
+    const result = await createAndAuthorizeNfeFromSale({ companyId, saleId });
+    const ok = result.nfe.status === 'AUTHORIZED';
+    return c.json({
+      success: ok,
+      message: result.message,
+      nfe: result.nfe,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[fiscal/nfe POST]', err);
+    if (/relation .* does not exist/i.test(message)) {
+      return c.json(
+        { error: 'Execute scripts/add_nfce_emission.sql e scripts/add_nfe_emission.sql no banco' },
+        503,
+      );
+    }
+    const status = /bloqueada|desabilitado|não configurado|não encontrada|sem itens|endereço|cliente/i.test(
+      message,
+    )
+      ? 400
+      : 500;
+    return c.json({ error: message }, status);
+  }
+});
+
+fiscal.post('/nfe/:id/cancel', async (c) => {
+  const companyId = c.get('companyId');
+  const body = await c.req.json().catch(() => ({}));
+  const justification = String(body.justification || body.justificativa || '').trim();
+  try {
+    const nfe = await cancelNfe({
+      companyId,
+      nfeId: c.req.param('id'),
+      justification,
+    });
+    const ok = nfe?.status === 'CANCELLED';
+    return c.json({
+      success: ok,
+      message: ok ? 'NF-e cancelada' : `Cancelamento não aceito: ${nfe?.motivoStatus || ''}`,
+      nfe,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
