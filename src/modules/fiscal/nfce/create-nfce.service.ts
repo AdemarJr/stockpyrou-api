@@ -16,7 +16,7 @@ import {
   buildQrCodeUrl,
   wrapNFeProc,
 } from './nfce-xml-builder.js';
-import { buildDanfeHtml, buildEmitAddressLines } from './danfe.js';
+import { buildDanfeHtml, buildEmitAddressLines, ensureDanfeQrEmbedded } from './danfe.js';
 import { resolveRespTec } from './resp-tec.js';
 
 async function writeFiscalLog(params: {
@@ -116,6 +116,37 @@ export async function getNfceRaw(companyId: string, id: string) {
     [id, companyId],
   );
   return (rows[0] as Record<string, unknown>) || null;
+}
+
+/** DANFE HTML com QR embutido (atualiza notas antigas na primeira reimpressão). */
+export async function getDanfeHtml(
+  companyId: string,
+  id: string,
+): Promise<{ html: string; status: string; chaveAcesso: string | null } | null> {
+  const raw = await getNfceRaw(companyId, id);
+  if (!raw) return null;
+  const stored = raw.danfe_html != null ? String(raw.danfe_html) : null;
+  if (!stored) return null;
+
+  const qrUrl = raw.qr_code_url != null ? String(raw.qr_code_url) : null;
+  const { html, updated } = await ensureDanfeQrEmbedded(stored, qrUrl);
+
+  if (updated && html !== stored) {
+    try {
+      await query(
+        `UPDATE nfce SET danfe_html = $1, updated_at = now() WHERE id = $2 AND company_id = $3`,
+        [html, id, companyId],
+      );
+    } catch (err) {
+      console.warn('[nfce] não foi possível persistir DANFE com QR:', err);
+    }
+  }
+
+  return {
+    html,
+    status: String(raw.status || ''),
+    chaveAcesso: raw.chave_acesso != null ? String(raw.chave_acesso) : null,
+  };
 }
 
 export async function listNfce(
@@ -604,7 +635,7 @@ export async function createAndAuthorizeFromSale(params: {
       const authorizedXml = sefazRes.protNFeXml
         ? wrapNFeProc(signedXmlToSend, sefazRes.protNFeXml)
         : signedXmlToSend;
-      const danfe = buildDanfeHtml({
+      const danfe = await buildDanfeHtml({
         accessKey: accessKeyToUse,
         numero: Number(nfceRow.numero) || numero,
         serie: Number(nfceRow.serie) || serie,

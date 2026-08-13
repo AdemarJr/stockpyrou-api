@@ -14,6 +14,7 @@ import {
   getNfceById,
   getNfceBySale,
   getNfceRaw,
+  getDanfeHtml,
   listNfce,
   listPendingNfceSales,
   syncInboundNfe,
@@ -403,11 +404,14 @@ fiscal.get('/nfce/:id', async (c) => {
 
 fiscal.get('/nfce/:id/danfe', async (c) => {
   const companyId = c.get('companyId');
-  const raw = await getNfceRaw(companyId, c.req.param('id'));
-  if (!raw) return c.json({ error: 'NFC-e não encontrada' }, 404);
-  const html = raw.danfe_html != null ? String(raw.danfe_html) : null;
-  if (!html) return c.json({ error: 'DANFE ainda não disponível' }, 404);
-  return c.json({ success: true, html, status: raw.status, chaveAcesso: raw.chave_acesso });
+  const danfe = await getDanfeHtml(companyId, c.req.param('id'));
+  if (!danfe) return c.json({ error: 'DANFE ainda não disponível' }, 404);
+  return c.json({
+    success: true,
+    html: danfe.html,
+    status: danfe.status,
+    chaveAcesso: danfe.chaveAcesso,
+  });
 });
 
 fiscal.get('/nfce/:id/xml', async (c) => {

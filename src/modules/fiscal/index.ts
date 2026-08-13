@@ -16,6 +16,7 @@ import {
   getNfceById,
   getNfceBySale,
   getNfceRaw,
+  getDanfeHtml,
   listNfce,
   listPendingNfceSales,
 } from './nfce/create-nfce.service.js';
@@ -42,6 +43,7 @@ export {
   getNfceById,
   getNfceBySale,
   getNfceRaw,
+  getDanfeHtml,
   listNfce,
   listPendingNfceSales,
   syncInboundNfe,
