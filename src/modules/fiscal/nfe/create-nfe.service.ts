@@ -159,7 +159,7 @@ export async function listNfe(
   }
   if (opts.to) {
     params.push(opts.to);
-    where += ` AND COALESCE(data_emissao, created_at) <= $${params.length}::timestamptz`;
+    where += ` AND COALESCE(data_emissao, created_at) < $${params.length}::timestamptz`;
   }
   if (opts.status) {
     params.push(opts.status);
