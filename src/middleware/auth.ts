@@ -80,3 +80,23 @@ export function requirePermission(flag: PermissionFlag) {
     await next();
   };
 }
+
+/** Exige pelo menos um dos flags (superadmin sempre passa). */
+export function requireAnyPermission(...flags: PermissionFlag[]) {
+  return async (c: Context<{ Variables: AppVariables }>, next: Next) => {
+    const auth = c.get('auth');
+    if (!auth) {
+      return c.json({ error: 'Unauthorized' }, 401);
+    }
+    const role = mapAppUserRole(String(auth.role || ''));
+    if (role === 'superadmin') {
+      await next();
+      return;
+    }
+    const perms = auth.permissions ?? getPermissionsByRole(role);
+    if (!flags.some((flag) => perms[flag])) {
+      return c.json({ error: 'Sem permissão para esta operação' }, 403);
+    }
+    await next();
+  };
+}

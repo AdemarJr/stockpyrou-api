@@ -3,7 +3,12 @@ import { fetchAllRows } from '../db/paginate.js';
 import { query } from '../db/pool.js';
 import { mapMovementRow, mapStockEntryRow } from '../mappers/stock.js';
 import type { AppVariables } from '../middleware/auth.js';
-import { requireAuth, requireCompany, requirePermission } from '../middleware/auth.js';
+import {
+  requireAnyPermission,
+  requireAuth,
+  requireCompany,
+  requirePermission,
+} from '../middleware/auth.js';
 import {
   deleteLedgerForExpense,
   ledgerFromExpense,
@@ -17,6 +22,12 @@ stock.use('*', async (c, next) => {
   if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') {
     await next();
     return;
+  }
+  // PDV Caixa (operador) registra a venda e em seguida chama /deduct —
+  // precisa baixar estoque sem ter gestão completa (entradas, balanço, etc.).
+  const path = c.req.path;
+  if (method === 'POST' && (path === '/deduct' || path.endsWith('/deduct'))) {
+    return requireAnyPermission('canManageStock', 'canAccessCashier')(c, next);
   }
   return requirePermission('canManageStock')(c, next);
 });
