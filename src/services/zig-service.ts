@@ -318,6 +318,25 @@ function zigSalePrimaryYmd(
   );
 }
 
+/**
+ * Dia para agrupar na UI de baixa dentro de um intervalo selecionado.
+ * Prioriza `transactionDate` quando cai no período (vendas aparecem no dia civil real);
+ * senão `eventDate` no período (noite qua→qui continua no dia de abertura se só ele foi selecionado).
+ */
+function zigSaleBucketYmd(
+  sale: Pick<ZigSale, "eventDate" | "transactionDate">,
+  startYmd: string,
+  endYmd: string,
+): string {
+  const txYmd = zigSaleTransactionYmd(sale);
+  const eventYmd = zigSaleEventYmd(sale);
+  const inRange = (ymd: string | null) =>
+    !!ymd && ymd >= startYmd && ymd <= endYmd;
+  if (inRange(txYmd)) return txYmd!;
+  if (inRange(eventYmd)) return eventYmd!;
+  return zigSalePrimaryYmd(sale);
+}
+
 /** Linha pertence ao dia civil `ymd` se evento ou transação cair nesse dia. */
 function zigSaleBelongsToYmd(
   sale: Pick<ZigSale, "eventDate" | "transactionDate">,
@@ -1321,7 +1340,7 @@ export const fetchPendingSales = async (
       
       const product = findProduct(sale);
       const qtyEff = zigEffectiveCount(sale);
-      const saleDate = zigSalePrimaryYmd(sale);
+      const saleDate = zigSaleBucketYmd(sale, startStr, endStr);
       
       const lineId = zigLineItemId(sale);
       const displaySku = sale.productSku?.trim() || matchKey;
@@ -1461,6 +1480,7 @@ export const fetchPendingSales = async (
       totalSales: salesWithProducts.length,
       totalValue: salesWithProducts.reduce((sum, s) => sum + (s.totalValue || 0), 0),
       dateRange: { start: startStr, end: endStr },
+      daysInRange: eachYmdInRangeSaoPaulo(startStr, endStr),
       previewSessionId,
     };
   } catch (error: any) {
