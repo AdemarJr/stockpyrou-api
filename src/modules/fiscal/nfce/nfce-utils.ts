@@ -16,6 +16,32 @@ export function padLeft(value: string | number, len: number, ch = '0'): string {
   return String(value).padStart(len, ch);
 }
 
+/** Fuso de emissão NFC-e/NF-e (Manaus/AM — UTC-4, sem horário de verão). */
+export const NFE_EMISSION_OFFSET_HOURS = -4;
+
+/** Data/hora civil de emissão com offset fixo — base única para AAMM (chave) e dhEmi (XML). */
+export function emissionPartsWithOffset(
+  d: Date,
+  offsetHours = NFE_EMISSION_OFFSET_HOURS,
+): {
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  second: number;
+} {
+  const local = new Date(d.getTime() + offsetHours * 3600 * 1000);
+  return {
+    year: local.getUTCFullYear(),
+    month: local.getUTCMonth() + 1,
+    day: local.getUTCDate(),
+    hour: local.getUTCHours(),
+    minute: local.getUTCMinutes(),
+    second: local.getUTCSeconds(),
+  };
+}
+
 /** Dígito verificador módulo 11 da chave NFC-e/NF-e. */
 export function accessKeyCheckDigit(key43: string): string {
   const weights = [2, 3, 4, 5, 6, 7, 8, 9];
@@ -46,8 +72,10 @@ export function buildAccessKey(params: {
   cnf?: string;
 }): string {
   const cUF = UF_IBGE[params.uf.toUpperCase()] || '13';
-  const yy = String(params.emissionDate.getFullYear()).slice(-2);
-  const mm = padLeft(params.emissionDate.getMonth() + 1, 2);
+  // AAMM deve coincidir com o mês/ano de dhEmi (Manaus). Servidor UTC após 20h AM gerava 502.
+  const { year, month } = emissionPartsWithOffset(params.emissionDate);
+  const yy = String(year).slice(-2);
+  const mm = padLeft(month, 2);
   const cnpj = padLeft(onlyDigits(params.cnpj), 14);
   const mod = String(params.modelo || '65').replace(/\D/g, '').padStart(2, '0').slice(-2) || '65';
   const serie = padLeft(params.serie, 3);
@@ -61,17 +89,11 @@ export function buildAccessKey(params: {
 }
 
 /** dhEmi com offset de Manaus (UTC-4, sem horário de verão). */
-export function formatNFeDate(d: Date, offsetHours = -4): string {
-  const local = new Date(d.getTime() + offsetHours * 3600 * 1000);
-  const y = local.getUTCFullYear();
-  const m = padLeft(local.getUTCMonth() + 1, 2);
-  const day = padLeft(local.getUTCDate(), 2);
-  const h = padLeft(local.getUTCHours(), 2);
-  const min = padLeft(local.getUTCMinutes(), 2);
-  const s = padLeft(local.getUTCSeconds(), 2);
+export function formatNFeDate(d: Date, offsetHours = NFE_EMISSION_OFFSET_HOURS): string {
+  const { year, month, day, hour, minute, second } = emissionPartsWithOffset(d, offsetHours);
   const sign = offsetHours >= 0 ? '+' : '-';
   const abs = padLeft(Math.abs(offsetHours), 2);
-  return `${y}-${m}-${day}T${h}:${min}:${s}${sign}${abs}:00`;
+  return `${year}-${padLeft(month, 2)}-${padLeft(day, 2)}T${padLeft(hour, 2)}:${padLeft(minute, 2)}:${padLeft(second, 2)}${sign}${abs}:00`;
 }
 
 export function money(n: number): string {
