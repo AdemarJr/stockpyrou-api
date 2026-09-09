@@ -278,6 +278,10 @@ costs.get('/expenses', async (c) => {
   const companyId = c.get('companyId');
   const dueFrom = c.req.query('dueDateFrom') || c.req.query('from');
   const dueTo = c.req.query('dueDateTo') || c.req.query('to');
+  /** due = vencimento (padrão); payment = data do pagamento (último payment_date). */
+  const dateFieldRaw = String(c.req.query('dateField') || 'due').toLowerCase();
+  const dateField = dateFieldRaw === 'payment' ? 'payment' : 'due';
+  const dateColumn = dateField === 'payment' ? 'e.payment_date' : 'e.due_date';
   const costCenterId = c.req.query('costCenterId');
   const expenseTypeId = c.req.query('expenseTypeId');
   const supplierId = c.req.query('supplierId');
@@ -288,11 +292,15 @@ costs.get('/expenses', async (c) => {
 
   if (dueFrom) {
     params.push(dueFrom);
-    where.push(`e.due_date >= $${params.length}`);
+    where.push(`${dateColumn} >= $${params.length}`);
   }
   if (dueTo) {
     params.push(dueTo);
-    where.push(`e.due_date <= $${params.length}`);
+    where.push(`${dateColumn} <= $${params.length}`);
+  }
+  // Sem payment_date não entra no recorte por data de pagamento
+  if (dateField === 'payment' && (dueFrom || dueTo)) {
+    where.push(`e.payment_date IS NOT NULL`);
   }
   if (costCenterId) {
     params.push(costCenterId);
@@ -321,7 +329,7 @@ costs.get('/expenses', async (c) => {
      LEFT JOIN cost_centers cc ON cc.id = e.cost_center_id
      LEFT JOIN suppliers s ON s.id = e.supplier_id
      WHERE ${where.join(' AND ')}
-     ORDER BY e.due_date DESC`,
+     ORDER BY ${dateColumn} DESC NULLS LAST`,
     params,
   );
 
