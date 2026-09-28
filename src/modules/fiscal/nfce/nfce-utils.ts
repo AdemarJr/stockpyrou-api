@@ -12,6 +12,61 @@ export function onlyDigits(v: string): string {
   return String(v || '').replace(/\D/g, '');
 }
 
+/** Rejeita sequências repetidas (000… / 111…) usadas em CPF/CNPJ inválidos. */
+function isRepeatedDigits(digits: string): boolean {
+  return /^(\d)\1+$/.test(digits);
+}
+
+function mod11CheckDigit(base: string, weights: number[]): number {
+  let sum = 0;
+  for (let i = 0; i < weights.length; i++) {
+    sum += Number(base[i]) * weights[i];
+  }
+  const mod = sum % 11;
+  return mod < 2 ? 0 : 11 - mod;
+}
+
+/** Valida CPF (11 dígitos + DV). Vazio/errado → false. */
+export function isValidCpf(value: string): boolean {
+  const digits = onlyDigits(value);
+  if (digits.length !== 11 || isRepeatedDigits(digits)) return false;
+  const d1 = mod11CheckDigit(digits.slice(0, 9), [10, 9, 8, 7, 6, 5, 4, 3, 2]);
+  if (d1 !== Number(digits[9])) return false;
+  const d2 = mod11CheckDigit(digits.slice(0, 10), [11, 10, 9, 8, 7, 6, 5, 4, 3, 2]);
+  return d2 === Number(digits[10]);
+}
+
+/** Valida CNPJ (14 dígitos + DV). Vazio/errado → false. */
+export function isValidCnpj(value: string): boolean {
+  const digits = onlyDigits(value);
+  if (digits.length !== 14 || isRepeatedDigits(digits)) return false;
+  const w1 = [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2];
+  const w2 = [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2];
+  const d1 = mod11CheckDigit(digits.slice(0, 12), w1);
+  if (d1 !== Number(digits[12])) return false;
+  const d2 = mod11CheckDigit(digits.slice(0, 13), w2);
+  return d2 === Number(digits[13]);
+}
+
+/**
+ * Destinatário NFC-e só entra no XML com CPF/CNPJ válido.
+ * Em branco, incompleto ou com DV errado → null (consumidor não identificado).
+ */
+export function resolveNfceDestDocument(
+  rawDigits: string | null | undefined,
+  preferredType?: 'cpf' | 'cnpj' | null,
+): { documentDigits: string; documentType: 'cpf' | 'cnpj' } | null {
+  const digits = onlyDigits(String(rawDigits || ''));
+  if (!digits) return null;
+  if (preferredType === 'cnpj' || digits.length === 14) {
+    return isValidCnpj(digits) ? { documentDigits: digits, documentType: 'cnpj' } : null;
+  }
+  if (preferredType === 'cpf' || digits.length === 11) {
+    return isValidCpf(digits) ? { documentDigits: digits, documentType: 'cpf' } : null;
+  }
+  return null;
+}
+
 export function padLeft(value: string | number, len: number, ch = '0'): string {
   return String(value).padStart(len, ch);
 }

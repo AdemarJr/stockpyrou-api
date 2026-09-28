@@ -9,7 +9,13 @@ import {
 } from '../sefaz/sefaz-endpoints.js';
 import { loadCompanyCertificate, signXmlEnveloped } from '../certificate/xml-signer.js';
 import { SefazAmClient } from '../sefaz/sefaz-client.js';
-import { buildAccessKey, onlyDigits, formatNFeDate, escapeXml } from './nfce-utils.js';
+import {
+  buildAccessKey,
+  onlyDigits,
+  formatNFeDate,
+  escapeXml,
+  resolveNfceDestDocument,
+} from './nfce-utils.js';
 import {
   attachInfNFeSupl,
   buildNfceXml,
@@ -353,7 +359,7 @@ export async function createAndAuthorizeFromSale(params: {
   }
   if (items.length === 0) throw new Error('Venda sem itens');
 
-  // Destinatário
+  // Destinatário — só inclui CPF/CNPJ válido; senão NFC-e como consumidor não identificado
   let dest: {
     documentDigits: string;
     documentType: 'cpf' | 'cnpj';
@@ -372,19 +378,34 @@ export async function createAndAuthorizeFromSale(params: {
     );
     const c = custRows[0] as Record<string, unknown> | undefined;
     if (c) {
+      const doc = resolveNfceDestDocument(
+        String(c.document_digits || ''),
+        c.document_type === 'cnpj' ? 'cnpj' : 'cpf',
+      );
+      if (doc) {
+        dest = {
+          documentDigits: doc.documentDigits,
+          documentType: doc.documentType,
+          name: String(c.name || 'CONSUMIDOR'),
+        };
+      }
+    }
+  } else if (details.customerDocument) {
+    const doc = resolveNfceDestDocument(
+      String(details.customerDocument),
+      details.customerDocumentType === 'cnpj'
+        ? 'cnpj'
+        : details.customerDocumentType === 'cpf'
+          ? 'cpf'
+          : null,
+    );
+    if (doc) {
       dest = {
-        documentDigits: String(c.document_digits),
-        documentType: c.document_type === 'cnpj' ? 'cnpj' : 'cpf',
-        name: String(c.name),
+        documentDigits: doc.documentDigits,
+        documentType: doc.documentType,
+        name: String(details.customerName || 'CONSUMIDOR'),
       };
     }
-  } else if (details.customerDocument && details.customerName) {
-    const digits = onlyDigits(String(details.customerDocument));
-    dest = {
-      documentDigits: digits,
-      documentType: digits.length === 14 ? 'cnpj' : 'cpf',
-      name: String(details.customerName),
-    };
   }
 
   const serie = Number(config.serie_nfce) || 1;
